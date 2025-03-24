@@ -1,0 +1,40 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+You are a video automation engineer.
+Build a complete, efficient, production-ready Python pipeline that does the following:
+
+⸻
+
+🎯 Objective: Convert a YouTube video into a short-form vertical clip with engaging overlay, suitable for TikTok, Reels, and Shorts.
+
+⸻
+
+Workflow Overview:
+	1.	Use yt-dlp to download a YouTube video from a given URL.
+	2.	Use Auto-Editor to automatically cut highlights by removing low-activity segments (audio silence/motion).
+	3.	Use Whisper (OpenAI or faster Whisper.cpp variant) to generate transcripts and accurate subtitles for each highlight.
+	4.	Burn subtitles into each highlight clip using ffmpeg.
+	5.	Use ffmpeg to crop the highlight for top-half placement in a vertical 9:16 video (1080x1920).
+	6.	Load a pre-existing Subway Surfers gameplay video. Loop it if needed using ffmpeg so its duration matches the highlight.
+	7.	Stack the highlight (top) and the gameplay video (bottom) into a single 9:16 vertical video using ffmpeg vstack.
+	8.	Output a final video (MP4, H.264 + AAC), optimized and ready for social media upload.
+
+⸻
+
+💡 Constraints & Requirements:
+	•	Use only the following tools/libraries: yt-dlp, Auto-Editor, Whisper, ffmpeg.
+	•	Must support multiple highlight clips in one run (batch-friendly).
+	•	Ensure output resolution is 1080x1920 (TikTok-ready).
+	•	The Subway Surfers clip should loop to match each highlight’s duration if needed.
+	•	Subtitle style: clean, readable, centered above the speaker’s head.
+
+⸻
+
+🛠️ Output:
+	•	Provide a Python script or shell commands for full automation.
+	•	Explain the steps inline via comments for clarity.
+	•	Do not include GUI or manual steps – all code must be headless and automatable.
