@@ -3,10 +3,8 @@ import os
 import asyncio
 import tempfile
 from pathlib import Path
-import shutil
 import time
 import streamlit.components.v1 as components
-import base64
 import zipfile
 
 # Import from our modules
@@ -16,7 +14,6 @@ from brainrot_pipeline import process_video
 # Pong Game implementation using HTML5/JavaScript for Streamlit
 def show_pong_game():
     """Display a simple Pong game in Streamlit while processing"""
-    # HTML and JavaScript implementation of Pong
     pong_game_html = """
     <div style="width:100%; max-width:500px; margin:0 auto; background:#111; border-radius:10px; overflow:hidden; box-shadow:0 4px 16px rgba(0,0,0,0.2);">
         <h3 style="text-align:center; color:white; padding:15px; margin:0; background:linear-gradient(90deg, #FF5F6D 0%, #FFC371 100%);">🏓 Pong Game</h3>
@@ -40,13 +37,11 @@ def show_pong_game():
         </div>
     </div>
     <script>
-        // Create the Pong game
         const canvas = document.getElementById('pongCanvas');
         const ctx = canvas.getContext('2d');
         const leftScoreDisplay = document.getElementById('leftScore');
         const rightScoreDisplay = document.getElementById('rightScore');
         
-        // Game variables
         const paddleWidth = 10;
         const paddleHeight = 70;
         const ballRadius = 8;
@@ -61,14 +56,11 @@ def show_pong_game():
         let keysPressed = {};
         let gamePaused = false;
         let particles = [];
-        // AI difficulty (higher = more difficult)
         let aiDifficulty = 0.8; 
         let aiReactionSpeed = 3; // Lower = faster
         
-        // Event listeners for keyboard controls
         document.addEventListener('keydown', function(e) {
             keysPressed[e.key] = true;
-            // Prevent default for game control keys to avoid page scrolling
             if (['w', 's', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
                 e.preventDefault();
             }
@@ -78,7 +70,6 @@ def show_pong_game():
             keysPressed[e.key] = false;
         });
         
-        // Pause/resume when focus changes
         canvas.addEventListener('focus', function() {
             gamePaused = false;
         });
@@ -87,16 +78,13 @@ def show_pong_game():
             gamePaused = true;
         });
         
-        // Click to focus and play
         canvas.addEventListener('click', function() {
             canvas.focus();
             gamePaused = false;
         });
         
-        // Make canvas focusable
         canvas.setAttribute('tabindex', '0');
         
-        // Particle class for visual effects
         class Particle {
             constructor(x, y, color) {
                 this.x = x;
@@ -126,26 +114,20 @@ def show_pong_game():
             }
         }
         
-        // Create particles on collision
         function createParticles(x, y, count, color) {
             for (let i = 0; i < count; i++) {
                 particles.push(new Particle(x, y, color));
             }
         }
         
-        // AI for controlling the right paddle
         function moveAI() {
-            // Predict where the ball will be when it reaches the right side
             if (ballSpeedX > 0) { // Only move if ball is coming toward AI
-                // Calculate approximate ball position when it reaches the right side
                 const distanceToRightSide = canvas.width - ballRadius - ballX;
                 const timeToReachRightSide = distanceToRightSide / ballSpeedX;
                 const predictedY = ballY + (ballSpeedY * timeToReachRightSide);
                 
-                // Add some randomness to make AI imperfect
                 const targetY = predictedY + (Math.random() * 20 - 10) * (1 - aiDifficulty);
                 
-                // Move towards the predicted position
                 const paddleCenter = rightPaddleY + paddleHeight / 2;
                 if (paddleCenter < targetY - 10) {
                     rightPaddleY += aiReactionSpeed * aiDifficulty;
@@ -153,17 +135,12 @@ def show_pong_game():
                     rightPaddleY -= aiReactionSpeed * aiDifficulty;
                 }
                 
-                // Keep paddle within canvas boundaries
                 rightPaddleY = Math.max(0, Math.min(canvas.height - paddleHeight, rightPaddleY));
             }
         }
-        
-        // Game loop
-        function gameLoop() {
-            // Clear the canvas
+                function gameLoop() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // Draw court lines
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
             ctx.setLineDash([5, 5]);
             ctx.beginPath();
@@ -172,13 +149,11 @@ def show_pong_game():
             ctx.stroke();
             ctx.setLineDash([]);
             
-            // Draw a circular center
             ctx.beginPath();
             ctx.arc(canvas.width / 2, canvas.height / 2, 30, 0, Math.PI * 2);
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
             ctx.stroke();
             
-            // Draw paddles with gradients
             const leftPaddleGradient = ctx.createLinearGradient(0, leftPaddleY, paddleWidth, leftPaddleY + paddleHeight);
             leftPaddleGradient.addColorStop(0, '#FF5F6D');
             leftPaddleGradient.addColorStop(1, '#FF8F9D');
@@ -191,7 +166,6 @@ def show_pong_game():
             ctx.fillStyle = rightPaddleGradient;
             ctx.fillRect(canvas.width - paddleWidth - 10, rightPaddleY, paddleWidth, paddleHeight);
             
-            // Draw ball with gradient
             const ballGradient = ctx.createRadialGradient(ballX, ballY, 0, ballX, ballY, ballRadius);
             ballGradient.addColorStop(0, '#FFFFFF');
             ballGradient.addColorStop(1, '#FF5F6D');
@@ -200,13 +174,11 @@ def show_pong_game():
             ctx.fillStyle = ballGradient;
             ctx.fill();
             
-            // Add ball shadow
             ctx.beginPath();
             ctx.arc(ballX + 2, ballY + 2, ballRadius, 0, Math.PI * 2);
             ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
             ctx.fill();
             
-            // Update and draw particles
             for (let i = particles.length - 1; i >= 0; i--) {
                 particles[i].update();
                 particles[i].draw();
@@ -216,7 +188,6 @@ def show_pong_game():
                 }
             }
             
-            // If game is paused, show pause message and return
             if (gamePaused) {
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -228,10 +199,8 @@ def show_pong_game():
                 return;
             }
             
-            // Move the AI paddle
             moveAI();
             
-            // Move player paddle based on key presses (supporting both WASD and arrow keys)
             if ((keysPressed['w'] || keysPressed['W'] || keysPressed['ArrowUp']) && leftPaddleY > 0) {
                 leftPaddleY -= 6;
             }
@@ -239,30 +208,25 @@ def show_pong_game():
                 leftPaddleY += 6;
             }
             
-            // Move the ball
             ballX += ballSpeedX;
             ballY += ballSpeedY;
             
-            // Ball collision with top and bottom
             if (ballY - ballRadius < 0 || ballY + ballRadius > canvas.height) {
                 ballSpeedY = -ballSpeedY;
                 createParticles(ballX, ballY < ballRadius ? 0 : canvas.height, 10, '#FFF');
             }
             
-            // Ball collision with paddles
             if (
                 ballX - ballRadius < 20 && 
                 ballY > leftPaddleY && 
                 ballY < leftPaddleY + paddleHeight
             ) {
-                // Calculate angle based on where ball hits paddle
                 const hitPosition = (ballY - leftPaddleY) / paddleHeight;
                 const angle = (hitPosition - 0.5) * Math.PI / 2; // -PI/4 to PI/4
                 
                 ballSpeedX = Math.abs(ballSpeedX) * 1.05; // Increase speed slightly
                 ballSpeedY = Math.sin(angle) * 6;
                 
-                // Increase difficulty slightly each time player hits the ball
                 aiDifficulty = Math.min(0.95, aiDifficulty + 0.01);
                 
                 createParticles(ballX, ballY, 15, '#FF5F6D');
@@ -273,7 +237,6 @@ def show_pong_game():
                 ballY > rightPaddleY && 
                 ballY < rightPaddleY + paddleHeight
             ) {
-                // Calculate angle based on where ball hits paddle
                 const hitPosition = (ballY - rightPaddleY) / paddleHeight;
                 const angle = (hitPosition - 0.5) * Math.PI / 2; // -PI/4 to PI/4
                 
@@ -283,7 +246,6 @@ def show_pong_game():
                 createParticles(ballX, ballY, 15, '#FFC371');
             }
             
-            // Ball out of bounds
             if (ballX < 0) {
                 rightScore++;
                 rightScoreDisplay.textContent = rightScore;
@@ -298,7 +260,6 @@ def show_pong_game():
                 resetBall();
             }
             
-            // Cap ball speed
             const maxSpeed = 12;
             if (Math.abs(ballSpeedX) > maxSpeed) {
                 ballSpeedX = maxSpeed * Math.sign(ballSpeedX);
@@ -307,25 +268,20 @@ def show_pong_game():
                 ballSpeedY = maxSpeed * Math.sign(ballSpeedY);
             }
             
-            // Continue the game loop
             requestAnimationFrame(gameLoop);
         }
         
-        // Reset ball to center
         function resetBall() {
             ballX = canvas.width / 2;
             ballY = canvas.height / 2;
             
-            // Random angle between -PI/4 and PI/4
             const angle = (Math.random() - 0.5) * Math.PI / 2;
-            // Start ball towards the player sometimes to keep things interesting
             const direction = Math.random() > 0.7 ? -1 : 1;
             
             ballSpeedX = direction * 4 * Math.cos(angle);
             ballSpeedY = 4 * Math.sin(angle);
         }
         
-        // Give canvas focus and start the game
         canvas.focus();
         gameLoop();
     </script>

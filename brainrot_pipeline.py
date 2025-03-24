@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 import time
 import shutil
+import random
 from concurrent.futures import ProcessPoolExecutor
 
 # Import our modules
@@ -56,21 +57,54 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
     formatter = VideoFormatter(str(temp_dir))
     
     if not subway_video_path:
-        possible_paths = [
-            Path("assets/Subway Surfer Gameplay.mp4"),
-            Path("./assets/Subway Surfer Gameplay.mp4"),
-            Path("../assets/Subway Surfer Gameplay.mp4"),
-            Path(os.path.expanduser("~/FR8/Brainrot Automacion/assets/Subway Surfer Gameplay.mp4"))
+        # Look for all suitable background videos in assets directory
+        assets_dir = Path("assets")
+        background_videos = []
+        
+        possible_asset_paths = [
+            Path("assets"),
+            Path("./assets"),
+            Path("../assets"),
+            Path(os.path.expanduser("~/FR8/Brainrot Automacion/assets"))
         ]
-        for path in possible_paths:
-            if path.exists():
-                subway_video_path = str(path)
-                print(f"✅ Found Subway Surfers video at: {subway_video_path}")
+        
+        # Find the assets directory
+        for asset_path in possible_asset_paths:
+            if asset_path.exists() and asset_path.is_dir():
+                assets_dir = asset_path
                 break
-        if not subway_video_path or not os.path.exists(subway_video_path):
-            print("❌ ERROR: Subway Surfer Gameplay.mp4 not found!")
-            print("Please place the video in the assets folder or specify it with --subway-video")
-            return None
+        
+        # Find all video files in the assets directory
+        if assets_dir.exists():
+            print(f"Looking for background videos in {assets_dir}")
+            for file in assets_dir.glob("*.mp4"):
+                background_videos.append(str(file))
+            for file in assets_dir.glob("*.mov"):
+                background_videos.append(str(file))
+            for file in assets_dir.glob("*.avi"):
+                background_videos.append(str(file))
+                
+        if background_videos:
+            # Randomly select a background video
+            subway_video_path = random.choice(background_videos)
+            print(f"✅ Randomly selected background video: {subway_video_path}")
+        else:
+            # Legacy fallback to explicitly named subway surfers video
+            possible_paths = [
+                Path("assets/Subway Surfer Gameplay.mp4"),
+                Path("./assets/Subway Surfer Gameplay.mp4"),
+                Path("../assets/Subway Surfer Gameplay.mp4"),
+                Path(os.path.expanduser("~/FR8/Brainrot Automacion/assets/Subway Surfer Gameplay.mp4"))
+            ]
+            for path in possible_paths:
+                if path.exists():
+                    subway_video_path = str(path)
+                    print(f"✅ Found Subway Surfers video at: {subway_video_path}")
+                    break
+            if not subway_video_path or not os.path.exists(subway_video_path):
+                print("❌ ERROR: No suitable background videos found!")
+                print("Please place video files in the assets folder or specify one with --subway-video")
+                return None
     
     final_outputs = []
     process_pool = ProcessPoolExecutor(max_workers=min(os.cpu_count(), 4))
@@ -199,20 +233,19 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                 clip_duration = float(stdout.decode().strip())
                 background_filename = f"bg_{clip_basename}.mp4"
                 background_clip_path = str(temp_dir / background_filename)
+                
                 try:
-                    loop_cmd = [
-                        "ffmpeg", "-y",
-                        "-stream_loop", "-1",
-                        "-i", subway_video_path,
-                        "-t", str(clip_duration),
-                        "-c:v", "libx264", "-crf", "23",
-                        "-an",
-                        background_clip_path
-                    ]
-                    await run_subprocess_async(loop_cmd)
-                    if os.path.exists(background_clip_path):
-                        print(f"✅ Prepared background video: {background_clip_path}")
-                        background_clip = background_clip_path
+                    # Use the enhanced formatter method that supports random start and better cropping
+                    formatter = VideoFormatter(str(temp_dir))
+                    background_clip = await asyncio.to_thread(
+                        formatter.loop_subway_surfers,
+                        subway_video_path,
+                        clip_duration,
+                        background_filename
+                    )
+                    
+                    if background_clip and os.path.exists(background_clip):
+                        print(f"✅ Prepared background video with random start position: {background_clip}")
                         use_background = True
                     else:
                         print(f"⚠️ Failed to prepare background video, falling back to black background")
@@ -288,55 +321,107 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     if bottom_height % 2 != 0:
                         bottom_height -= 1
                         top_ideal_height += 1
-                    print(f"Optimized heights: Main={top_ideal_height}px, Subway={bottom_height}px")
+                    print(f"Optimized heights: Main={top_ideal_height}px, Bottom={bottom_height}px (Total: {total_height}px)")
+                    
+                    # Scale top video to EXACTLY 1080px width to match other videos
                     top_video_scaled = temp_dir / f"top_scaled_{clip_basename}.mp4"
                     top_scale_cmd = [
                         "ffmpeg", "-y",
                         "-i", str(subtitled_clip),
-                        "-vf", f"scale=1080:{top_ideal_height}:force_original_aspect_ratio=decrease,setsar=1:1",
+                        "-vf", f"scale=1080:{top_ideal_height}:force_original_aspect_ratio=disable,setsar=1:1",
                         "-c:v", "libx264", "-crf", "23",
                         "-c:a", "aac", "-b:a", "192k",
                         str(top_video_scaled)
                     ]
                     await run_subprocess_async(top_scale_cmd)
-                    bottom_video_scaled = temp_dir / f"bottom_scaled_{clip_basename}.mp4"
+                    
+                    # Get information about the scaled top video
                     probe_cmd = [
                         "ffprobe", 
                         "-v", "error", 
                         "-select_streams", "v:0", 
-                        "-show_entries", "stream=width,height", 
+                        "-show_entries", "stream=width,height,duration", 
+                        "-of", "csv=p=0", 
+                        str(top_video_scaled)
+                    ]
+                    _, stdout, _ = await run_subprocess_async(probe_cmd)
+                    top_width, top_height, top_duration = stdout.decode().strip().split(',')
+                    top_width, top_height = int(top_width), int(top_height)
+                    print(f"Top video scaled dimensions: {top_width}x{top_height}")
+                    
+                    # Verify top video has exactly 1080px width
+                    if top_width != 1080:
+                        print(f"Warning: Top video width is {top_width}px, not 1080px. Rescaling...")
+                        fixed_top = temp_dir / f"fixed_top_{clip_basename}.mp4"
+                        fix_cmd = [
+                            "ffmpeg", "-y",
+                            "-i", str(top_video_scaled),
+                            "-vf", "scale=1080:-2,setsar=1:1",
+                            "-c:v", "libx264", "-crf", "23",
+                            "-c:a", "aac", "-b:a", "192k",
+                            str(fixed_top)
+                        ]
+                        await run_subprocess_async(fix_cmd)
+                        top_video_scaled = fixed_top
+                        print(f"Fixed top video width to 1080px")
+                    
+                    # Use the background clip directly (the bg_highlight)
+                    print(f"Using background clip directly: {background_clip}")
+                    
+                    # Verify background clip dimensions and ensure it's 1080px wide
+                    probe_cmd = [
+                        "ffprobe", 
+                        "-v", "error", 
+                        "-select_streams", "v:0", 
+                        "-show_entries", "stream=width,height,duration", 
                         "-of", "csv=p=0", 
                         str(background_clip)
                     ]
                     _, stdout, _ = await run_subprocess_async(probe_cmd)
-                    bg_width, bg_height = map(int, stdout.decode().strip().split(','))
-                    scale_factor = max(1080 / bg_width, bottom_height / bg_height)
-                    scaled_height = int(bg_height * scale_factor)
-                    y_offset = max(0, scaled_height - bottom_height)
-                    new_height = bottom_height + scaled_height
-                    bottom_scale_cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(background_clip),
-                        "-vf", f"scale=1080:{new_height}:force_original_aspect_ratio=increase,crop=1080:{bottom_height}:0:{y_offset}",
-                        "-c:v", "libx264", "-crf", "23",
-                        "-an",
-                        str(bottom_video_scaled)
-                    ]
-                    await run_subprocess_async(bottom_scale_cmd)
+                    parts = stdout.decode().strip().split(',')
+                    bg_width, bg_height = int(parts[0]), int(parts[1])
+                    print(f"Background video dimensions: {bg_width}x{bg_height}")
+                    
+                    # Ensure background has exactly 1080px width
+                    if bg_width != 1080:
+                        print(f"Warning: Background video width is {bg_width}px, not 1080px. Rescaling...")
+                        fixed_bg = temp_dir / f"fixed_bg_{clip_basename}.mp4"
+                        fix_cmd = [
+                            "ffmpeg", "-y",
+                            "-i", str(background_clip),
+                            "-vf", "scale=1080:-2,setsar=1:1",
+                            "-c:v", "libx264", "-crf", "23",
+                            "-an",
+                            str(fixed_bg)
+                        ]
+                        await run_subprocess_async(fix_cmd)
+                        background_clip = fixed_bg
+                        print(f"Fixed background video width to 1080px")
+                    
+                    # Create a thin gradient separator (ensure it's 1080px wide)
                     gradient = temp_dir / f"gradient_{clip_basename}.mp4"
+                    gradient_height = 4  # 4px gradient
                     gradient_cmd = [
                         "ffmpeg", "-y",
                         "-f", "lavfi",
-                        "-i", f"color=c=0x333333:s=1080x4:d=0.1:r=30",
+                        "-i", f"color=c=0x333333:s=1080x{gradient_height}:d=0.1:r=30",
                         "-c:v", "libx264", "-crf", "23",
                         str(gradient)
                     ]
                     await run_subprocess_async(gradient_cmd)
+                    
+                    # Check all videos have the same width before stacking
+                    print(f"Stacking videos with the following inputs:")
+                    print(f"1. Top video: {top_video_scaled} (1080x{top_height})")
+                    print(f"2. Gradient: {gradient} (1080x{gradient_height})")
+                    print(f"3. Background: {background_clip} (1080x{bg_height})")
+                    
+                    # Stack videos using vstack filter
                     stack_cmd = [
                         "ffmpeg", "-y",
                         "-i", str(top_video_scaled),
                         "-i", str(gradient),
-                        "-i", str(bottom_video_scaled),
+                        "-i", str(background_clip),
                         "-filter_complex", "[0:v][1:v][2:v]vstack=inputs=3[v]",
                         "-map", "[v]",
                         "-map", "0:a",
@@ -344,9 +429,73 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                         "-c:a", "aac", "-b:a", "192k",
                         str(final_path)
                     ]
-                    await run_subprocess_async(stack_cmd)
+                    
+                    print(f"Running stack command: {' '.join(stack_cmd)}")
+                    stack_result, _, stack_error = await run_subprocess_async(stack_cmd, check=False)
+                    
+                    # If vstack fails, try alternative approach
+                    if stack_result != 0:
+                        print(f"Vstack failed with error code {stack_result}. Error: {stack_error.decode() if stack_error else 'Unknown error'}")
+                        print("Trying alternative approach with scale and padding...")
+                        
+                        # Try with scaling + padding approach
+                        scale_pad_cmd = [
+                            "ffmpeg", "-y",
+                            "-i", str(top_video_scaled),
+                            "-i", str(background_clip),
+                            "-filter_complex",
+                            f"[0:v]scale=1080:{top_height}:force_original_aspect_ratio=disable,setsar=1:1[top];" +
+                            f"[1:v]scale=1080:{bg_height}:force_original_aspect_ratio=disable,setsar=1:1[bottom];" +
+                            f"[top][bottom]vstack=inputs=2[v]",
+                            "-map", "[v]",
+                            "-map", "0:a",
+                            "-c:v", "libx264", "-crf", "23",
+                            "-c:a", "aac", "-b:a", "192k",
+                            str(final_path)
+                        ]
+                        print(f"Running alternative command: {' '.join(scale_pad_cmd)}")
+                        alt_result, _, alt_error = await run_subprocess_async(scale_pad_cmd, check=False)
+                        
+                        if alt_result != 0:
+                            print(f"Alternative approach failed with error code {alt_result}. Error: {alt_error.decode() if alt_error else 'Unknown error'}")
+                            print("Falling back to concat method...")
+                            
+                            # Try concat demuxer as last resort
+                            concat_file = temp_dir / f"concat_{clip_basename}.txt"
+                            with open(concat_file, 'w') as f:
+                                f.write(f"file '{str(top_video_scaled.absolute())}'\n")
+                                f.write(f"file '{str(gradient.absolute())}'\n")
+                                f.write(f"file '{str(background_clip.absolute())}'\n")
+                            
+                            print(f"Created concat file at {concat_file}")
+                            concat_cmd = [
+                                "ffmpeg", "-y",
+                                "-f", "concat",
+                                "-safe", "0",
+                                "-i", str(concat_file),
+                                "-c:v", "libx264", "-crf", "23",
+                                "-c:a", "copy",
+                                str(final_path)
+                            ]
+                            await run_subprocess_async(concat_cmd, check=False)
+                    
+                    # Verify the final stacked video
                     if final_path.exists() and final_path.stat().st_size > 0:
-                        print(f"✅ Created stacked video: {final_path}")
+                        probe_cmd = [
+                            "ffprobe", 
+                            "-v", "error", 
+                            "-select_streams", "v:0", 
+                            "-show_entries", "stream=width,height,duration", 
+                            "-of", "csv=p=0", 
+                            str(final_path)
+                        ]
+                        _, stdout, _ = await run_subprocess_async(probe_cmd, check=False)
+                        if stdout:
+                            parts = stdout.decode().strip().split(',')
+                            final_width, final_height = int(parts[0]), int(parts[1])
+                            print(f"✅ Created stacked video: {final_path} ({final_width}x{final_height})")
+                        else:
+                            print(f"✅ Created stacked video: {final_path}")
                     else:
                         print(f"⚠️ Failed to create stacked video, falling back to subtitled clip only")
                         shutil.copy2(subtitled_clip, final_path)

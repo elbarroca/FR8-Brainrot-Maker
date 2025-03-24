@@ -350,8 +350,8 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
     
     print(f"Using font: {bold_font_path}")
     
-    # Add visual emphasis by increasing stroke width for better visibility
-    stroke_width = 3.5  # Increase stroke width for more visibility
+    # Increase stroke width for more pronounced black outline
+    stroke_width = 4.5  # Increase from 3.5 to 4.5 for bolder outline
     
     # Create text clips for each word in the subtitle
     for index, wordJSON in enumerate(textJSON['textcontents']):
@@ -362,8 +362,8 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
             word_clip = TextClip(text=wordJSON['word'], 
                                 font=bold_font_path,
                                 font_size=fontsize, 
-                                color=color,
-                                stroke_color=stroke_color,
+                                color=color,  # This will be yellow when passed in
+                                stroke_color=stroke_color,  # This will be black
                                 stroke_width=int(stroke_width))
             word_clip = word_clip.with_start(textJSON['start']).with_duration(full_duration)
         except Exception as e:
@@ -467,7 +467,7 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
         try:
             # Enhanced highlight with shadow effect for better visibility
             # Increase stroke width for highlighted words
-            highlight_stroke_width = int(stroke_width) + 1
+            highlight_stroke_width = int(stroke_width) + 2  # Increase from +1 to +2 for even bolder highlight outline
             
             # Create the highlight clip with enhanced styling
             word_clip_highlight = TextClip(
@@ -727,7 +727,7 @@ def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_posi
                 try:
                     # Enhanced subtitles with better styling
                     # Use the subtitles filter with styling parameters
-                    subtitle_style = f"force_style='Fontname=Arial,Fontsize=24,PrimaryColour=&H{color_hex},OutlineColour=&H000000,BorderStyle=3,Outline=2,Shadow=1'"
+                    subtitle_style = f"force_style='Fontname=Arial,Fontsize=24,PrimaryColour=&H{color_hex},OutlineColour=&H000000,BorderStyle=3,Outline=3,Shadow=1'"
                     
                     subprocess.run([
                         "ffmpeg", "-y",
@@ -916,7 +916,7 @@ def test_subtitle_pipeline(input_video_path, output_dir="output"):
     fontsize = 5  # % of frame height
     opacity = 0.8
     max_chars = 50
-    text_color = "white"
+    text_color = "yellow"
     
     # 5. Process and add subtitles
     output_path, _ = add_subtitle(
