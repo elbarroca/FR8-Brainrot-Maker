@@ -690,7 +690,7 @@ if st.session_state.processed_clips:
         st.markdown('</div>', unsafe_allow_html=True)
     
     # Display clips in a 4-column grid
-    col_count = 4  # Number of columns in the grid
+    col_count = 5  # Number of columns in the grid
     clips_count = len(st.session_state.processed_clips)
     rows = (clips_count + col_count - 1) // col_count  # Ceiling division to get number of rows
     
@@ -757,4 +757,4 @@ elif st.session_state.processing_status == "processing":
 
 # Footer
 st.divider()
-st.markdown("Made with ❤️ by [Ricardo Barroca](https://rbarroca.com) | [GitHub Repo](https://github.com/ricardo-barroca/brainrot-automation)")
+st.markdown("Made with Brainrot by [Ricardo Barroca](https://rbarroca.com) | [GitHub Repo](https://github.com/elbarroca/FR8-Brainrot-Maker)")

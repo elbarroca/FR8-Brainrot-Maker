@@ -5,7 +5,6 @@ from faster_whisper import WhisperModel
 from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
 from PIL import ImageFont
 import requests
-import shutil
 
 # Google Fonts to download and use
 GOOGLE_FONTS = {
@@ -304,38 +303,34 @@ def set_clip_position(clip, position, relative=False):
                     return clip
 
 def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color, font="Arial", stroke_color='black', stroke_width=2.6):
-    """Create text clip for captions with highlighting effect"""
+    """Create text clip for captions with highlighting effect and animation"""
     wordcount = len(textJSON['textcontents'])
     full_duration = textJSON['end'] - textJSON['start']
 
     word_clips = []
     xy_textclips_positions = []
 
-    x_pos = 0
-    y_pos = 0
-    line_width = 0  # Total width of words in the current line
+    # For perfect center positioning, calculate frame dimensions
     frame_width = framesize[0]
     frame_height = framesize[1]
-
-    x_buffer = frame_width * 1 / 10
-
-    max_line_width = frame_width - 2 * (x_buffer)
     
+    # Increase font size for Brainrot style big bold subtitles
     fontsize = int(frame_height * fontsize/100)  # Convert percentage to pixels
     
-    space_width = 0
-    space_height = 0
-
-    # First determine which font to use - try to use Poppins if available
-    bold_font_path = None
+    # Configure text layout for center position
+    x_buffer = frame_width * 1 / 10
+    max_line_width = frame_width - 2 * (x_buffer)
     
-    # Check if Poppins fonts exist
+    # Initialize positions to build text from the center
+    x_pos = 0
+    y_pos = 0
+    line_width = 0
+    max_height = 0
+    
+    # Use Poppins Bold font if available
+    bold_font_path = None
     if FONTS and 'bold' in FONTS and os.path.exists(FONTS['bold']):
         bold_font_path = FONTS['bold']
-    elif os.path.exists("./fonts/Poppins-Bold.ttf"):
-        bold_font_path = "./fonts/Poppins-Bold.ttf"
-    elif os.path.exists("./Poppins/Poppins-ExtraBold.ttf"):  # Use path from example
-        bold_font_path = "./Poppins/Poppins-ExtraBold.ttf"
     else:
         # Fallback to system fonts
         for system_font in ["Arial", "Helvetica", "Verdana"]:
@@ -343,82 +338,83 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
                 bold_font_path = f"./fonts/{system_font}.ttf"
                 break
     
-    # If we still don't have a font, create a simple placeholder
     if not bold_font_path:
-        print("Warning: No font files found, using default font")
         bold_font_path = font  # Use the font parameter as fallback
     
-    print(f"Using font: {bold_font_path}")
+    # Heavy stroke width for better visibility with no background
+    stroke_width = 8.0
     
-    # Increase stroke width for more pronounced black outline
-    stroke_width = 4.5  # Increase from 3.5 to 4.5 for bolder outline
+    # Import video effects for animations
+    try:
+        from moviepy.video.fx import fadeout, fadein
+        has_effects = True
+    except ImportError:
+        has_effects = False
     
     # Create text clips for each word in the subtitle
     for index, wordJSON in enumerate(textJSON['textcontents']):
         duration = wordJSON['end'] - wordJSON['start']
         
-        # Create the word clip - use the style from the example
         try:
-            word_clip = TextClip(text=wordJSON['word'], 
-                                font=bold_font_path,
-                                font_size=fontsize, 
-                                color=color,  # This will be yellow when passed in
-                                stroke_color=stroke_color,  # This will be black
-                                stroke_width=int(stroke_width))
-            word_clip = word_clip.with_start(textJSON['start']).with_duration(full_duration)
+            # Create word clip with enhanced motion effects
+            word_clip = TextClip(
+                text=wordJSON['word'], 
+                font=bold_font_path,
+                font_size=fontsize, 
+                color="#FFFF00",  # Bright yellow
+                stroke_color="black",
+                stroke_width=int(stroke_width)
+            )
+            
+            word_duration = full_duration
+            word_start_time = wordJSON['start'] - textJSON['start']
+            word_clip = word_clip.with_start(word_start_time).with_duration(duration)
+            
+            # Add animation effects
+            if has_effects:
+                fade_duration = min(0.2, duration / 3)
+                word_clip = word_clip.fx(fadein, fade_duration)
+                word_clip = word_clip.fx(fadeout, fade_duration)
+                
         except Exception as e:
-            print(f"Error creating text clip for '{wordJSON['word']}': {e}")
-            # Try again with simpler parameters
+            print(f"Error creating text clip: {e}")
+            # Simplified fallback
             try:
-                word_clip = TextClip(text=wordJSON['word'], 
-                                    font=bold_font_path,
-                                    font_size=fontsize, 
-                                    color=color)
-                word_clip = word_clip.with_start(textJSON['start']).with_duration(full_duration)
-            except Exception as e2:
-                print(f"Failed to create text clip with simplified settings: {e2}")
-                try:
-                    # Most basic attempt
-                    word_clip = TextClip(text=wordJSON['word'], 
-                                        font=bold_font_path,
-                                        font_size=fontsize)
-                    word_clip = word_clip.with_start(textJSON['start']).with_duration(full_duration)
-                except Exception as e3:
-                    print(f"Failed even basic text creation: {e3}")
-                    continue
+                word_clip = TextClip(
+                    text=wordJSON['word'], 
+                    font=bold_font_path,
+                    font_size=fontsize, 
+                    color="#FFFF00"
+                )
+                word_clip = word_clip.with_start(word_start_time).with_duration(duration)
+            except Exception:
+                continue
         
-        # Create a space after the word
+        # Create a space after word (with zero width for better alignment)
         try:
-            word_clip_space = TextClip(text=" ", 
-                                      font=bold_font_path, 
-                                      font_size=fontsize, 
-                                      color=color)
-            word_clip_space = word_clip_space.with_start(textJSON['start']).with_duration(full_duration)
-        except Exception as e:
-            try:
-                # Simpler space clip
-                word_clip_space = TextClip(text=" ", 
-                                          font=bold_font_path, 
-                                          font_size=fontsize)
-                word_clip_space = word_clip_space.with_start(textJSON['start']).with_duration(full_duration)
-            except Exception as e2:
-                print(f"Failed to create space: {e2}")
-                # Create an empty clip with a small width
-                word_clip_space = ColorClip(
-                    size=(5, fontsize), 
-                    color=(0,0,0,0),
-                    duration=float(full_duration)
-                ).with_opacity(0).with_start(float(textJSON['start']))
+            word_clip_space = TextClip(
+                text=" ", 
+                font=bold_font_path, 
+                font_size=fontsize, 
+                color="#FFFF00"
+            )
+            word_clip_space = word_clip_space.with_start(word_start_time).with_duration(duration)
+            space_width = 0  # Use zero width for tighter text
+            space_height = 0
+        except Exception:
+            # Empty clip fallback
+            word_clip_space = ColorClip(
+                size=(5, fontsize),
+                color=(0,0,0,0),
+                duration=float(duration)
+            ).with_opacity(0).with_start(float(word_start_time))
+            space_width = 0
+            space_height = 0
         
         word_width, word_height = word_clip.size
-        space_width, space_height = word_clip_space.size
-        
-        # The example sets space_width and space_height to 0
-        space_width = 0
-        space_height = 0
         
         if line_width + word_width + space_width <= max_line_width:
-            # Store info of each word_clip created
+            # Store position info
             xy_textclips_positions.append({
                 "x_pos": x_pos,
                 "y_pos": y_pos,
@@ -430,9 +426,31 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
                 "duration": duration
             })
 
-            # Use set_position instead of with_position
-            word_clip = set_clip_position(word_clip, (x_pos, y_pos))
-            word_clip_space = set_clip_position(word_clip_space, (x_pos + word_width, y_pos))
+            # Add bounce and slide animation
+            def word_position(t):
+                # Slide in from left with slight bounce effect
+                progress = min(1, t * 3) if t < 0.3 else 1
+                start_x = -word_width  # Start from left of frame
+                end_x = x_pos
+                current_x = start_x + (end_x - start_x) * progress
+                
+                # Add subtle bounce using sine wave
+                import math
+                bounce = 0
+                if progress > 0.8 and progress < 1:
+                    # Only bounce at the end of the animation
+                    bounce_progress = (progress - 0.8) * 5  # Scale to 0-1 range
+                    bounce = 5 * math.sin(bounce_progress * math.pi)
+                
+                return (current_x, y_pos + bounce)
+            
+            try:
+                word_clip = set_clip_position(word_clip, word_position)
+                word_clip_space = set_clip_position(word_clip_space, lambda t: (x_pos + word_width, y_pos))
+            except Exception:
+                # Static position fallback
+                word_clip = set_clip_position(word_clip, (x_pos, y_pos))
+                word_clip_space = set_clip_position(word_clip_space, (x_pos + word_width, y_pos))
 
             x_pos = x_pos + word_width + space_width
             line_width = line_width + word_width + space_width
@@ -442,7 +460,6 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
             y_pos = y_pos + word_height + 10
             line_width = word_width + space_width
 
-            # Store info of each word_clip created
             xy_textclips_positions.append({
                 "x_pos": x_pos,
                 "y_pos": y_pos,
@@ -454,64 +471,68 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
                 "duration": duration
             })
 
-            # Use set_position instead of with_position
-            word_clip = set_clip_position(word_clip, (x_pos, y_pos))
-            word_clip_space = set_clip_position(word_clip_space, (x_pos + word_width, y_pos))
+            # New line animation from right
+            def new_line_position(t):
+                progress = min(1, t * 3) if t < 0.3 else 1
+                start_x = frame_width  # Start from right of frame
+                end_x = x_pos
+                current_x = start_x + (end_x - start_x) * progress
+                return (current_x, y_pos)
+            
+            try:
+                word_clip = set_clip_position(word_clip, new_line_position)
+                word_clip_space = set_clip_position(word_clip_space, lambda t: (x_pos + word_width, y_pos))
+            except Exception:
+                word_clip = set_clip_position(word_clip, (x_pos, y_pos))
+                word_clip_space = set_clip_position(word_clip_space, (x_pos + word_width, y_pos))
+
             x_pos = word_width + space_width
 
         word_clips.append(word_clip)
         word_clips.append(word_clip_space)
 
-    # Create highlight effects for words with improved visibility
+    # Create highlight effects with pulsing animation
     for highlight_word in xy_textclips_positions:
         try:
-            # Enhanced highlight with shadow effect for better visibility
-            # Increase stroke width for highlighted words
-            highlight_stroke_width = int(stroke_width) + 2  # Increase from +1 to +2 for even bolder highlight outline
-            
-            # Create the highlight clip with enhanced styling
             word_clip_highlight = TextClip(
                 text=highlight_word['word'], 
                 font=bold_font_path, 
-                font_size=fontsize, 
-                color=highlight_color,
-                stroke_color=stroke_color, 
-                stroke_width=highlight_stroke_width
+                font_size=fontsize,
+                color="#FFFFFF",  # Pure white for highlighted words
+                stroke_color="black", 
+                stroke_width=int(stroke_width)
             )
             
-            # Apply timing
-            word_clip_highlight = word_clip_highlight.with_start(float(highlight_word['start'])).with_duration(float(highlight_word['duration']))
+            highlight_start = highlight_word['start'] - textJSON['start']
+            highlight_duration = highlight_word['duration']
             
-            # Use set_position for position
-            word_clip_highlight = set_clip_position(word_clip_highlight, (highlight_word['x_pos'], highlight_word['y_pos']))
-            word_clips.append(word_clip_highlight)
+            word_clip_highlight = word_clip_highlight.with_start(float(highlight_start)).with_duration(float(highlight_duration))
             
-            # Add a slight glow effect by creating a slightly larger version of the text behind it
-            # (This creates a pseudo-glow effect)
+            # Pulsing animation effect
+            def highlight_position(t):
+                import math
+                base_x = highlight_word['x_pos']
+                base_y = highlight_word['y_pos']
+                
+                # Pulse scale effect (subtle size change)
+                pulse_scale = 1.0 + 0.05 * math.sin(t * 2 * math.pi * 2)
+                
+                # Apply scaling by adjusting position
+                width_diff = (highlight_word['width'] * pulse_scale - highlight_word['width']) / 2
+                height_diff = (highlight_word['height'] * pulse_scale - highlight_word['height']) / 2
+                
+                return (base_x - width_diff, base_y - height_diff)
+            
             try:
-                glow_clip = TextClip(
-                    text=highlight_word['word'], 
-                    font=bold_font_path, 
-                    font_size=fontsize + 1,  # Slightly larger
-                    color=highlight_color,
-                    stroke_color=highlight_color, 
-                    stroke_width=1  # Thin stroke of the highlight color
-                )
-                
-                # Apply timing and position
-                glow_clip = glow_clip.with_start(float(highlight_word['start'])).with_duration(float(highlight_word['duration']))
-                # Position slightly offset to create glow effect
-                glow_clip = set_clip_position(glow_clip, (highlight_word['x_pos'] - 1, highlight_word['y_pos'] - 1))
-                
-                # Add the glow clip BEFORE the highlight clip (so it appears behind)
-                word_clips.insert(len(word_clips) - 1, glow_clip)
-            except Exception as glow_error:
-                print(f"Error creating glow effect: {glow_error}")
-                # Continue without the glow effect
+                word_clip_highlight = set_clip_position(word_clip_highlight, highlight_position)
+            except Exception:
+                word_clip_highlight = set_clip_position(word_clip_highlight, 
+                                                     (highlight_word['x_pos'], highlight_word['y_pos']))
+            
+            word_clips.append(word_clip_highlight)
 
         except Exception as highlight_error:
-            print(f"Error creating highlight for word {highlight_word['word']}: {highlight_error}")
-            # Skip this highlight if it fails
+            print(f"Error creating highlight: {highlight_error}")
 
     return word_clips, xy_textclips_positions
 
@@ -581,19 +602,17 @@ def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_posi
                 # Use a semi-transparent gradient background with rounded corners
                 try:
                     # Create a slightly larger background for padding
-                    padding = 15  # pixels of padding around text
+                    padding = 20  # Increased padding around text for better visibility
                     
                     # Create main background with gradient effect
-                    # Use a darker color with higher opacity for better readability
+                    # Remove background completely for Brainrot style subtitles (transparent)
                     color_clip = ColorClip(
                         size=(int(max_width + padding * 2), int(max_height + padding * 2)),
-                        color=(30, 30, 30)  # Darker background
+                        color=(0, 0, 0)  # Color doesn't matter as we'll make it transparent
                     )
                     
-                    # Apply opacity - adjust for better visibility
-                    # Higher opacity (0.7-0.9) makes text more readable
-                    adjusted_opacity = min(opacity + 0.2, 0.9)  # Increase opacity but cap at 0.9
-                    color_clip = color_clip.with_opacity(adjusted_opacity)
+                    # Apply opacity - make completely transparent for text-only style
+                    color_clip = color_clip.with_opacity(0)  # Set to 0 for no background
                     
                     # Set timing
                     color_clip = color_clip.with_start(line['start']).with_duration(line['end'] - line['start'])
@@ -625,8 +644,48 @@ def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_posi
                 elif subs_position == "top":
                     # Position near the top for better visibility
                     clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 0.15), relative=True)
+                elif subs_position == "center" or subs_position == "middle":
+                    # Position exactly in the center-middle of the frame
+                    video_width, video_height = input_video.size
+                    overlay_width, overlay_height = clip_to_overlay.size
+                    
+                    # Calculate the exact center coordinates (in pixels)
+                    x_center = (video_width - overlay_width) / 2
+                    y_center = (video_height - overlay_height) / 2
+                    
+                    print(f"Video size: {video_width}x{video_height}, Overlay size: {overlay_width}x{overlay_height}")
+                    print(f"Positioning subtitle at absolute center: ({x_center}, {y_center})")
+                    
+                    # Use absolute positioning to ensure exact center placement
+                    clip_to_overlay = set_clip_position(clip_to_overlay, (x_center, y_center))
                 else:
-                    clip_to_overlay = set_clip_position(clip_to_overlay, subs_position)
+                    # Handle custom position tuple like (x, y)
+                    try:
+                        if isinstance(subs_position, tuple) and len(subs_position) == 2:
+                            x_pos, y_pos = subs_position
+                            video_width, video_height = input_video.size
+                            overlay_width, overlay_height = clip_to_overlay.size
+                            
+                            # If x_pos is close to half the video width, center horizontally
+                            if abs(x_pos - (video_width / 2)) < 10:
+                                x_pos = (video_width - overlay_width) / 2
+                                
+                            # Make sure the subtitles stay within the video bounds
+                            x_pos = max(0, min(x_pos, video_width - overlay_width))
+                            y_pos = max(0, min(y_pos, video_height - overlay_height))
+                            
+                            print(f"Positioning subtitle at custom coordinates: ({x_pos}, {y_pos})")
+                            print(f"Video size: {video_width}x{video_height}, Overlay size: {overlay_width}x{overlay_height}")
+                            
+                            clip_to_overlay = set_clip_position(clip_to_overlay, (x_pos, y_pos))
+                        else:
+                            # Fallback to center if position is invalid
+                            print(f"Invalid position format: {subs_position}, falling back to center")
+                            clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 'center'), relative=True)
+                    except Exception as pos_error:
+                        print(f"Error setting custom position {subs_position}: {pos_error}")
+                        # Fallback to center if there's an error
+                        clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 'center'), relative=True)
 
                 all_linelevel_splits.append(clip_to_overlay)
             except Exception as line_error:

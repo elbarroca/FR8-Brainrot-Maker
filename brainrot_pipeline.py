@@ -210,7 +210,7 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     print(f"⚠️ Error transcribing audio: {e}")
                     wordlevel_info = [{"word": "TRANSCRIPTION FAILED", "start": 0.0, "end": 5.0}]
             
-            # STEP 5: Prepare background
+            # STEP 5: PREPARING BACKGROUND (Clip {clip_index+1})
             print(f"\n=== STEP 5: PREPARING BACKGROUND (Clip {clip_index+1}) ===")
             if progress_queue:
                 await progress_queue.put({
@@ -254,49 +254,19 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     print(f"⚠️ Falling back to black background")
             else:
                 print(f"⚠️ No background video available, falling back to black background")
-            
-            # STEP 6: Add subtitles
-            print(f"\n=== STEP 6: ADDING SUBTITLES (Clip {clip_index+1}) ===")
+                
+            # STEP 6: CREATE COMBINED VIDEO (Clip {clip_index+1})
+            print(f"\n=== STEP 6: CREATING COMBINED VIDEO (Clip {clip_index+1}) ===")
             if progress_queue:
                 await progress_queue.put({
                     "type": "step", 
                     "step": 6, 
                     "highlight": clip_index+1,
-                    "description": "Adding subtitles"
+                    "description": "Creating combined video"
                 })
-            output_dir_subtitles = str(temp_dir / "subtitled")
-            os.makedirs(output_dir_subtitles, exist_ok=True)
-            # Offload subtitle processing to a thread
-            subtitled_clip, _ = await asyncio.to_thread(add_subtitle,
-                mobile_clip,
-                audio_path,
-                "9x16",
-                "top",
-                "#FFFF00",
-                6.0,
-                0.3,
-                12,
-                "#FFFFFF",
-                wordlevel_info,
-                output_dir_subtitles
-            )
-            if not subtitled_clip or not os.path.exists(subtitled_clip):
-                print(f"⚠️ Failed to add subtitles, using clip without subtitles")
-                subtitled_clip = mobile_clip
-            else:
-                print(f"✅ Added subtitles to clip: {subtitled_clip}")
+            combined_filename = f"combined_{clip_basename}.mp4"
+            combined_path = temp_dir / combined_filename
             
-            # STEP 7: Create final video
-            print(f"\n=== STEP 7: CREATING FINAL VIDEO (Clip {clip_index+1}) ===")
-            if progress_queue:
-                await progress_queue.put({
-                    "type": "step", 
-                    "step": 7, 
-                    "highlight": clip_index+1,
-                    "description": "Creating final video"
-                })
-            final_filename = f"brainrot_{clip_basename}.mp4"
-            final_path = output_dir / final_filename
             try:
                 if use_background and background_clip:
                     probe_cmd = [
@@ -305,7 +275,7 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                         "-select_streams", "v:0", 
                         "-show_entries", "stream=width,height", 
                         "-of", "csv=p=0", 
-                        str(subtitled_clip)
+                        str(mobile_clip)
                     ]
                     _, stdout, _ = await run_subprocess_async(probe_cmd)
                     top_width, top_height = map(int, stdout.decode().strip().split(','))
@@ -327,7 +297,7 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     top_video_scaled = temp_dir / f"top_scaled_{clip_basename}.mp4"
                     top_scale_cmd = [
                         "ffmpeg", "-y",
-                        "-i", str(subtitled_clip),
+                        "-i", str(mobile_clip),
                         "-vf", f"scale=1080:{top_ideal_height}:force_original_aspect_ratio=disable,setsar=1:1",
                         "-c:v", "libx264", "-crf", "23",
                         "-c:a", "aac", "-b:a", "192k",
@@ -427,7 +397,7 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                         "-map", "0:a",
                         "-c:v", "libx264", "-crf", "23",
                         "-c:a", "aac", "-b:a", "192k",
-                        str(final_path)
+                        str(combined_path)
                     ]
                     
                     print(f"Running stack command: {' '.join(stack_cmd)}")
@@ -451,7 +421,7 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                             "-map", "0:a",
                             "-c:v", "libx264", "-crf", "23",
                             "-c:a", "aac", "-b:a", "192k",
-                            str(final_path)
+                            str(combined_path)
                         ]
                         print(f"Running alternative command: {' '.join(scale_pad_cmd)}")
                         alt_result, _, alt_error = await run_subprocess_async(scale_pad_cmd, check=False)
@@ -475,39 +445,18 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                                 "-i", str(concat_file),
                                 "-c:v", "libx264", "-crf", "23",
                                 "-c:a", "copy",
-                                str(final_path)
+                                str(combined_path)
                             ]
                             await run_subprocess_async(concat_cmd, check=False)
-                    
-                    # Verify the final stacked video
-                    if final_path.exists() and final_path.stat().st_size > 0:
-                        probe_cmd = [
-                            "ffprobe", 
-                            "-v", "error", 
-                            "-select_streams", "v:0", 
-                            "-show_entries", "stream=width,height,duration", 
-                            "-of", "csv=p=0", 
-                            str(final_path)
-                        ]
-                        _, stdout, _ = await run_subprocess_async(probe_cmd, check=False)
-                        if stdout:
-                            parts = stdout.decode().strip().split(',')
-                            final_width, final_height = int(parts[0]), int(parts[1])
-                            print(f"✅ Created stacked video: {final_path} ({final_width}x{final_height})")
-                        else:
-                            print(f"✅ Created stacked video: {final_path}")
-                    else:
-                        print(f"⚠️ Failed to create stacked video, falling back to subtitled clip only")
-                        shutil.copy2(subtitled_clip, final_path)
                 else:
-                    print(f"⚠️ No background video available, using subtitled clip with black padding")
+                    print(f"⚠️ No background video available, using main clip with black padding")
                     probe_cmd = [
                         "ffprobe", 
                         "-v", "error", 
                         "-select_streams", "v:0", 
                         "-show_entries", "stream=width,height", 
                         "-of", "csv=p=0", 
-                        str(subtitled_clip)
+                        str(mobile_clip)
                     ]
                     _, stdout, _ = await run_subprocess_async(probe_cmd)
                     top_width, top_height = map(int, stdout.decode().strip().split(','))
@@ -518,25 +467,89 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     print(f"Adding {pad_height}px of padding to reach 9:16 aspect ratio")
                     pad_cmd = [
                         "ffmpeg", "-y",
-                        "-i", subtitled_clip,
+                        "-i", mobile_clip,
                         "-vf", f"scale=1080:{top_height},pad=1080:{top_height+pad_height}:0:0:color=black",
                         "-c:v", "libx264", "-crf", "23",
                         "-c:a", "aac", "-b:a", "192k",
-                        str(final_path)
+                        str(combined_path)
                     ]
                     await run_subprocess_async(pad_cmd)
-                    if not final_path.exists() or final_path.stat().st_size == 0:
-                        print(f"⚠️ Failed to create padded video, using original clip")
-                        shutil.copy2(subtitled_clip, final_path)
+                
+                # Check if the combined video was created successfully
+                if not combined_path.exists() or combined_path.stat().st_size == 0:
+                    print(f"⚠️ Failed to create combined video, falling back to original clip")
+                    shutil.copy2(mobile_clip, combined_path)
+                else:
+                    print(f"✅ Successfully created combined video: {combined_path}")
+                    
             except Exception as e:
-                print(f"⚠️ Error creating final video: {e}")
+                print(f"⚠️ Error creating combined video: {e}")
                 try:
-                    shutil.copy2(subtitled_clip, final_path)
+                    shutil.copy2(mobile_clip, combined_path)
                 except Exception as copy_error:
-                    print(f"❌ Error copying subtitled clip: {copy_error}")
+                    print(f"❌ Error copying mobile clip: {copy_error}")
                     return None
             
-            # STEP 8: Optimize final video
+            # STEP 7: ADD SUBTITLES TO COMBINED VIDEO (Clip {clip_index+1})
+            print(f"\n=== STEP 7: ADDING SUBTITLES (Clip {clip_index+1}) ===")
+            if progress_queue:
+                await progress_queue.put({
+                    "type": "step", 
+                    "step": 7, 
+                    "highlight": clip_index+1,
+                    "description": "Adding subtitles"
+                })
+            output_dir_subtitles = str(temp_dir / "subtitled")
+            os.makedirs(output_dir_subtitles, exist_ok=True)
+            
+            # First, probe combined video to get its dimensions
+            probe_cmd = [
+                "ffprobe", 
+                "-v", "error", 
+                "-select_streams", "v:0", 
+                "-show_entries", "stream=width,height", 
+                "-of", "csv=p=0", 
+                str(combined_path)
+            ]
+            _, stdout, _ = await run_subprocess_async(probe_cmd)
+            combined_width, combined_height = map(int, stdout.decode().strip().split(','))
+            print(f"Combined video dimensions: {combined_width}x{combined_height}")
+            
+            # Calculate subtitle position at the junction between top and bottom clips
+            # Place subtitles at the top of the bottom clip
+            if use_background and top_height is not None:
+                # Get the position where the top video ends and bottom video begins
+                subtitle_y = top_height + 10  # Add a small offset to place just below the border
+                print(f"Positioning subtitles at the top of bottom clip: y={subtitle_y}")
+            else:
+                # Fallback to a position that's 40% from the top of the video
+                subtitle_y = combined_height * 0.4
+                print(f"Using fallback subtitle position at 40% from top: y={subtitle_y}")
+                
+            subs_position = (combined_width / 2, subtitle_y)
+            print(f"Using subtitle position: {subs_position}")
+            
+            # Offload subtitle processing to a thread
+            subtitled_clip, _ = await asyncio.to_thread(add_subtitle,
+                str(combined_path),  # Now adding subtitles to the COMBINED video
+                audio_path,
+                "9x16",
+                subs_position,  # Using position at top of bottom clip
+                "#FFFF00",      # Yellow highlight color for the current word
+                12.0,           # Much larger font size for Brainrot style
+                0.0,            # No background opacity (transparent)
+                12,             # Max chars per line
+                "#FFFF00",      # Yellow text color for all text
+                wordlevel_info,
+                output_dir_subtitles
+            )
+            if not subtitled_clip or not os.path.exists(subtitled_clip):
+                print(f"⚠️ Failed to add subtitles, using combined video without subtitles")
+                subtitled_clip = str(combined_path)
+            else:
+                print(f"✅ Added subtitles to combined video: {subtitled_clip}")
+            
+            # STEP 8: OPTIMIZE FINAL VIDEO (Clip {clip_index+1})
             print(f"\n=== STEP 8: OPTIMIZING VIDEO (Clip {clip_index+1}) ===")
             if progress_queue:
                 await progress_queue.put({
@@ -545,6 +558,17 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     "highlight": clip_index+1,
                     "description": "Optimizing video"
                 })
+            final_filename = f"brainrot_{clip_basename}.mp4"
+            final_path = output_dir / final_filename
+            
+            # Copy the subtitled video to the final output location
+            try:
+                shutil.copy2(subtitled_clip, final_path)
+                print(f"✅ Copied final video to output directory: {final_path}")
+            except Exception as e:
+                print(f"⚠️ Error copying final video: {e}")
+                return None
+                
             optimized_filename = f"optimized_brainrot_{clip_basename}.mp4"
             optimized_path = output_dir / optimized_filename
             try:
