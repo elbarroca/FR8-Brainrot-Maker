@@ -303,242 +303,72 @@ def set_clip_position(clip, position, relative=False):
                     return clip
 
 def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color, font="Arial", stroke_color='black', stroke_width=2.6):
-    """Create text clip for captions with highlighting effect and animation"""
-    wordcount = len(textJSON['textcontents'])
-    full_duration = textJSON['end'] - textJSON['start']
-
-    word_clips = []
-    xy_textclips_positions = []
-
-    # For perfect center positioning, calculate frame dimensions
-    frame_width = framesize[0]
-    frame_height = framesize[1]
+    """Create a single text clip for each subtitle line with auto-wrapping"""
+    # Get frame dimensions
+    frame_width, frame_height = framesize
     
-    # Increase font size for Brainrot style big bold subtitles
-    fontsize = int(frame_height * fontsize/100)  # Convert percentage to pixels
+    # Calculate duration
+    start_time = textJSON['start']
+    end_time = textJSON['end']
+    duration = end_time - start_time
     
-    # Configure text layout for center position
-    x_buffer = frame_width * 1 / 10
-    max_line_width = frame_width - 2 * (x_buffer)
+    # Use smaller font size (4% of video height)
+    font_size = int(frame_height * 0.04)
     
-    # Initialize positions to build text from the center
-    x_pos = 0
-    y_pos = 0
-    line_width = 0
-    max_height = 0
+    # Set max width for text wrapping (80% of frame width)
+    max_text_width = int(frame_width * 0.8)
     
-    # Use Poppins Bold font if available
+    # Get bold font path
     bold_font_path = None
     if FONTS and 'bold' in FONTS and os.path.exists(FONTS['bold']):
         bold_font_path = FONTS['bold']
     else:
-        # Fallback to system fonts
-        for system_font in ["Arial", "Helvetica", "Verdana"]:
-            if os.path.exists(f"./fonts/{system_font}.ttf"):
-                bold_font_path = f"./fonts/{system_font}.ttf"
-                break
-    
-    if not bold_font_path:
         bold_font_path = font  # Use the font parameter as fallback
     
-    # Heavy stroke width for better visibility with no background
-    stroke_width = 8.0
+    # Set appropriate stroke width based on font size
+    stroke_width = max(1.5, fontsize / 25)
     
-    # Import video effects for animations
+    # Create the complete subtitle text
+    full_text = " ".join([word['word'] for word in textJSON['textcontents']])
+    
+    # Create a single text clip with auto-wrapping
     try:
-        from moviepy.video.fx import fadeout, fadein
-        has_effects = True
-    except ImportError:
-        has_effects = False
-    
-    # Create text clips for each word in the subtitle
-    for index, wordJSON in enumerate(textJSON['textcontents']):
-        duration = wordJSON['end'] - wordJSON['start']
+        text_clip = TextClip(
+            text=full_text,
+            font=bold_font_path,
+            font_size=font_size,
+            color=color,
+            stroke_color=stroke_color,
+            stroke_width=int(stroke_width),
+            method="caption",
+            size=(max_text_width, None)
+        )
         
+        # Set timing
+        text_clip = text_clip.with_start(start_time).with_duration(duration)
+        
+        # Add fade effects
         try:
-            # Create word clip with enhanced motion effects
-            word_clip = TextClip(
-                text=wordJSON['word'], 
-                font=bold_font_path,
-                font_size=fontsize, 
-                color="#FFFF00",  # Bright yellow
-                stroke_color="black",
-                stroke_width=int(stroke_width)
-            )
-            
-            word_duration = full_duration
-            word_start_time = wordJSON['start'] - textJSON['start']
-            word_clip = word_clip.with_start(word_start_time).with_duration(duration)
-            
-            # Add animation effects
-            if has_effects:
-                fade_duration = min(0.2, duration / 3)
-                word_clip = word_clip.fx(fadein, fade_duration)
-                word_clip = word_clip.fx(fadeout, fade_duration)
-                
-        except Exception as e:
-            print(f"Error creating text clip: {e}")
-            # Simplified fallback
-            try:
-                word_clip = TextClip(
-                    text=wordJSON['word'], 
-                    font=bold_font_path,
-                    font_size=fontsize, 
-                    color="#FFFF00"
-                )
-                word_clip = word_clip.with_start(word_start_time).with_duration(duration)
-            except Exception:
-                continue
+            from moviepy.video.fx import fadeout, fadein
+            fade_duration = min(0.15, duration / 8)
+            text_clip = text_clip.fx(fadein, fade_duration)
+            text_clip = text_clip.fx(fadeout, fade_duration)
+        except ImportError:
+            pass
         
-        # Create a space after word (with zero width for better alignment)
-        try:
-            word_clip_space = TextClip(
-                text=" ", 
-                font=bold_font_path, 
-                font_size=fontsize, 
-                color="#FFFF00"
-            )
-            word_clip_space = word_clip_space.with_start(word_start_time).with_duration(duration)
-            space_width = 0  # Use zero width for tighter text
-            space_height = 0
-        except Exception:
-            # Empty clip fallback
-            word_clip_space = ColorClip(
-                size=(5, fontsize),
-                color=(0,0,0,0),
-                duration=float(duration)
-            ).with_opacity(0).with_start(float(word_start_time))
-            space_width = 0
-            space_height = 0
+        return [text_clip], [{"word": full_text, "start": start_time, "end": end_time, "duration": duration}]
         
-        word_width, word_height = word_clip.size
-        
-        if line_width + word_width + space_width <= max_line_width:
-            # Store position info
-            xy_textclips_positions.append({
-                "x_pos": x_pos,
-                "y_pos": y_pos,
-                "width": word_width,
-                "height": word_height,
-                "word": wordJSON['word'],
-                "start": wordJSON['start'],
-                "end": wordJSON['end'],
-                "duration": duration
-            })
-
-            # Add bounce and slide animation
-            def word_position(t):
-                # Slide in from left with slight bounce effect
-                progress = min(1, t * 3) if t < 0.3 else 1
-                start_x = -word_width  # Start from left of frame
-                end_x = x_pos
-                current_x = start_x + (end_x - start_x) * progress
-                
-                # Add subtle bounce using sine wave
-                import math
-                bounce = 0
-                if progress > 0.8 and progress < 1:
-                    # Only bounce at the end of the animation
-                    bounce_progress = (progress - 0.8) * 5  # Scale to 0-1 range
-                    bounce = 5 * math.sin(bounce_progress * math.pi)
-                
-                return (current_x, y_pos + bounce)
-            
-            try:
-                word_clip = set_clip_position(word_clip, word_position)
-                word_clip_space = set_clip_position(word_clip_space, lambda t: (x_pos + word_width, y_pos))
-            except Exception:
-                # Static position fallback
-                word_clip = set_clip_position(word_clip, (x_pos, y_pos))
-                word_clip_space = set_clip_position(word_clip_space, (x_pos + word_width, y_pos))
-
-            x_pos = x_pos + word_width + space_width
-            line_width = line_width + word_width + space_width
-        else:
-            # Move to the next line
-            x_pos = 0
-            y_pos = y_pos + word_height + 10
-            line_width = word_width + space_width
-
-            xy_textclips_positions.append({
-                "x_pos": x_pos,
-                "y_pos": y_pos,
-                "width": word_width,
-                "height": word_height,
-                "word": wordJSON['word'],
-                "start": wordJSON['start'],
-                "end": wordJSON['end'],
-                "duration": duration
-            })
-
-            # New line animation from right
-            def new_line_position(t):
-                progress = min(1, t * 3) if t < 0.3 else 1
-                start_x = frame_width  # Start from right of frame
-                end_x = x_pos
-                current_x = start_x + (end_x - start_x) * progress
-                return (current_x, y_pos)
-            
-            try:
-                word_clip = set_clip_position(word_clip, new_line_position)
-                word_clip_space = set_clip_position(word_clip_space, lambda t: (x_pos + word_width, y_pos))
-            except Exception:
-                word_clip = set_clip_position(word_clip, (x_pos, y_pos))
-                word_clip_space = set_clip_position(word_clip_space, (x_pos + word_width, y_pos))
-
-            x_pos = word_width + space_width
-
-        word_clips.append(word_clip)
-        word_clips.append(word_clip_space)
-
-    # Create highlight effects with pulsing animation
-    for highlight_word in xy_textclips_positions:
-        try:
-            word_clip_highlight = TextClip(
-                text=highlight_word['word'], 
-                font=bold_font_path, 
-                font_size=fontsize,
-                color="#FFFFFF",  # Pure white for highlighted words
-                stroke_color="black", 
-                stroke_width=int(stroke_width)
-            )
-            
-            highlight_start = highlight_word['start'] - textJSON['start']
-            highlight_duration = highlight_word['duration']
-            
-            word_clip_highlight = word_clip_highlight.with_start(float(highlight_start)).with_duration(float(highlight_duration))
-            
-            # Pulsing animation effect
-            def highlight_position(t):
-                import math
-                base_x = highlight_word['x_pos']
-                base_y = highlight_word['y_pos']
-                
-                # Pulse scale effect (subtle size change)
-                pulse_scale = 1.0 + 0.05 * math.sin(t * 2 * math.pi * 2)
-                
-                # Apply scaling by adjusting position
-                width_diff = (highlight_word['width'] * pulse_scale - highlight_word['width']) / 2
-                height_diff = (highlight_word['height'] * pulse_scale - highlight_word['height']) / 2
-                
-                return (base_x - width_diff, base_y - height_diff)
-            
-            try:
-                word_clip_highlight = set_clip_position(word_clip_highlight, highlight_position)
-            except Exception:
-                word_clip_highlight = set_clip_position(word_clip_highlight, 
-                                                     (highlight_word['x_pos'], highlight_word['y_pos']))
-            
-            word_clips.append(word_clip_highlight)
-
-        except Exception as highlight_error:
-            print(f"Error creating highlight: {highlight_error}")
-
-    return word_clips, xy_textclips_positions
+    except Exception as e:
+        print(f"Error creating caption: {e}")
+        return [], []
 
 def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_position, highlight_color, fontsize, opacity, color, output_dir):
     """Apply subtitles to video with highlighting effect"""
     try:
+        # IMPORTANT: Explicitly override any position parameter to ensure only center
+        # This prevents any function calls with "bottom" position from creating subtitles
+        subs_position = "center"
+        
         # Ensure the output directory exists
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, 'output.mp4')
@@ -558,153 +388,52 @@ def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_posi
             input_video = VideoFileClip(videofilename)
         except Exception as e:
             print(f"Error loading video file: {e}")
-            # Try direct copy instead if loading fails
-            try:
-                import shutil
-                shutil.copy2(videofilename, output_path)
-                print(f"Copied original video to output: {output_path}")
-                return output_path
-            except Exception as copy_error:
-                print(f"Error copying fallback video: {copy_error}")
-                return videofilename
+            return videofilename
                 
         frame_size = input_video.size
         all_linelevel_splits = []
 
-        # Process each subtitle line
         for line in linelevel_subtitles:
             try:
                 # Verify line has required fields
                 if not all(key in line for key in ['word', 'start', 'end']):
-                    print(f"Skipping invalid subtitle line: {line}")
                     continue
                     
-                # Create caption for this line
-                out_clips, positions = create_caption(line, frame_size, v_type, highlight_color, fontsize, color)
+                # Create caption for this line - ONLY WHITE TEXT, no cyan/blue
+                out_clips, positions = create_caption(line, frame_size, v_type, None, fontsize, "white")
                 
                 # Skip if no clips or positions were created
                 if not out_clips or not positions:
-                    print(f"No clips created for line: {line}")
                     continue
                 
-                # Calculate dimensions for background box
-                max_width = 0
-                max_height = 0
+                # Create the text overlay without background
+                clip_to_overlay = CompositeVideoClip(out_clips)
 
-                for position in positions:
-                    x_pos, y_pos = position['x_pos'], position['y_pos']
-                    width, height = position['width'], position['height']
-
-                    max_width = max(max_width, x_pos + width)
-                    max_height = max(max_height, y_pos + height)
-
-                # Enhanced background for better subtitle visibility
-                # Use a semi-transparent gradient background with rounded corners
-                try:
-                    # Create a slightly larger background for padding
-                    padding = 20  # Increased padding around text for better visibility
-                    
-                    # Create main background with gradient effect
-                    # Remove background completely for Brainrot style subtitles (transparent)
-                    color_clip = ColorClip(
-                        size=(int(max_width + padding * 2), int(max_height + padding * 2)),
-                        color=(0, 0, 0)  # Color doesn't matter as we'll make it transparent
-                    )
-                    
-                    # Apply opacity - make completely transparent for text-only style
-                    color_clip = color_clip.with_opacity(0)  # Set to 0 for no background
-                    
-                    # Set timing
-                    color_clip = color_clip.with_start(line['start']).with_duration(line['end'] - line['start'])
-                    
-                    # Position the background clip to account for padding
-                    color_clip = set_clip_position(color_clip, (-padding, -padding))
-                except Exception as e:
-                    print(f"Error creating enhanced background: {e}")
-                    # Create a simpler fallback clip if there's an issue
-                    try:
-                        color_clip = ColorClip(
-                            size=(int(max_width * 1.1), int(max_height * 1.1)),
-                            color=(64, 64, 64)
-                        ).with_opacity(opacity).with_start(line['start']).with_duration(line['end'] - line['start'])
-                    except Exception as fallback_error:
-                        print(f"Error creating fallback background: {fallback_error}")
-                        # Create minimal clip
-                        color_clip = ColorClip(
-                            size=(1, 1),
-                            color=(64, 64, 64)
-                        ).with_opacity(0).with_start(line['start']).with_duration(line['end'] - line['start'])
-
-                # Compose the clips - place background first, then text clips
-                clip_to_overlay = CompositeVideoClip([color_clip] + out_clips)
-
-                # Position the subtitle based on subs_position
-                if subs_position == "bottom75":
-                    clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 0.75), relative=True)
-                elif subs_position == "top":
-                    # Position near the top for better visibility
-                    clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 0.15), relative=True)
-                elif subs_position == "center" or subs_position == "middle":
-                    # Position exactly in the center-middle of the frame
-                    video_width, video_height = input_video.size
-                    overlay_width, overlay_height = clip_to_overlay.size
-                    
-                    # Calculate the exact center coordinates (in pixels)
-                    x_center = (video_width - overlay_width) / 2
-                    y_center = (video_height - overlay_height) / 2
-                    
-                    print(f"Video size: {video_width}x{video_height}, Overlay size: {overlay_width}x{overlay_height}")
-                    print(f"Positioning subtitle at absolute center: ({x_center}, {y_center})")
-                    
-                    # Use absolute positioning to ensure exact center placement
-                    clip_to_overlay = set_clip_position(clip_to_overlay, (x_center, y_center))
-                else:
-                    # Handle custom position tuple like (x, y)
-                    try:
-                        if isinstance(subs_position, tuple) and len(subs_position) == 2:
-                            x_pos, y_pos = subs_position
-                            video_width, video_height = input_video.size
-                            overlay_width, overlay_height = clip_to_overlay.size
-                            
-                            # If x_pos is close to half the video width, center horizontally
-                            if abs(x_pos - (video_width / 2)) < 10:
-                                x_pos = (video_width - overlay_width) / 2
-                                
-                            # Make sure the subtitles stay within the video bounds
-                            x_pos = max(0, min(x_pos, video_width - overlay_width))
-                            y_pos = max(0, min(y_pos, video_height - overlay_height))
-                            
-                            print(f"Positioning subtitle at custom coordinates: ({x_pos}, {y_pos})")
-                            print(f"Video size: {video_width}x{video_height}, Overlay size: {overlay_width}x{overlay_height}")
-                            
-                            clip_to_overlay = set_clip_position(clip_to_overlay, (x_pos, y_pos))
-                        else:
-                            # Fallback to center if position is invalid
-                            print(f"Invalid position format: {subs_position}, falling back to center")
-                            clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 'center'), relative=True)
-                    except Exception as pos_error:
-                        print(f"Error setting custom position {subs_position}: {pos_error}")
-                        # Fallback to center if there's an error
-                        clip_to_overlay = set_clip_position(clip_to_overlay, ('center', 'center'), relative=True)
-
+                # Position in center only
+                video_width, video_height = input_video.size
+                overlay_width, overlay_height = clip_to_overlay.size
+                
+                # Calculate center coordinates
+                x_center = (video_width - overlay_width) / 2
+                y_center = (video_height - overlay_height) / 2
+                
+                # Center positioning only
+                clip_to_overlay = set_clip_position(clip_to_overlay, (x_center, y_center))
                 all_linelevel_splits.append(clip_to_overlay)
+                
             except Exception as line_error:
                 print(f"Error processing subtitle line: {line_error}")
                 continue
 
         # If we couldn't create any subtitle overlays, return original video
         if not all_linelevel_splits:
-            print("No subtitle overlays were created, returning original video")
             return videofilename
 
-        # Get input video duration
-        input_video_duration = input_video.duration
-
-        # Create final composite video
+        # Create final composite video with ONLY center white subtitles
         try:
             final_video = CompositeVideoClip([input_video] + all_linelevel_splits)
             
-            # Set the audio of the final video to be the same as the input video
+            # Set the audio of the final video
             if input_video.audio is not None:
                 try:
                     # First try set_audio
@@ -732,101 +461,17 @@ def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_posi
                 fps=24, 
                 codec="libx264", 
                 audio_codec="aac",
-                threads=2,  # Use fewer threads to avoid memory issues
-                logger=None  # Suppress excessive logging
+                threads=2,
+                logger=None
             )
             
-            # Verify the output file exists
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                print(f"Successfully created subtitled video: {output_path}")
                 return output_path
             else:
-                print("Output file is missing or empty, returning original video")
                 return videofilename
                 
         except Exception as render_error:
             print(f"Error rendering final video: {render_error}")
-            # Try fallback method with ffmpeg directly if moviepy fails
-            try:
-                print("Trying fallback direct ffmpeg method...")
-                import tempfile
-                import subprocess
-                
-                # Create a temporary SRT file
-                srt_path = os.path.join(tempfile.gettempdir(), "fallback_subs.srt")
-                with open(srt_path, 'w') as f:
-                    for i, line in enumerate(linelevel_subtitles):
-                        start_seconds = line['start']
-                        end_seconds = line['end']
-                        
-                        # Format time as HH:MM:SS,mmm
-                        start_time = format_srt_time(start_seconds)
-                        end_time = format_srt_time(end_seconds)
-                        
-                        f.write(f"{i+1}\n")
-                        f.write(f"{start_time} --> {end_time}\n")
-                        f.write(f"{line['word']}\n\n")
-                
-                # Use ffmpeg to add subtitles
-                # Properly format the color value for ffmpeg
-                if color.startswith('#'):
-                    color_hex = color[1:]  # Remove the # prefix
-                else:
-                    # Convert known color names to hex
-                    color_map = {
-                        'white': 'FFFFFF',
-                        'yellow': 'FFFF00',
-                        'red': 'FF0000',
-                        'green': '00FF00',
-                        'blue': '0000FF',
-                        'black': '000000'
-                    }
-                    color_hex = color_map.get(color.lower(), 'FFFFFF')
-                
-                try:
-                    # Enhanced subtitles with better styling
-                    # Use the subtitles filter with styling parameters
-                    subtitle_style = f"force_style='Fontname=Arial,Fontsize=24,PrimaryColour=&H{color_hex},OutlineColour=&H000000,BorderStyle=3,Outline=3,Shadow=1'"
-                    
-                    subprocess.run([
-                        "ffmpeg", "-y",
-                        "-i", videofilename,
-                        "-vf", f"subtitles={srt_path}:{subtitle_style}",
-                        "-c:a", "copy",
-                        output_path
-                    ], check=True)
-                except Exception as e:
-                    print(f"Enhanced subtitle fallback failed: {e}")
-                    # Try simpler subtitles
-                    try:
-                        subprocess.run([
-                            "ffmpeg", "-y",
-                            "-i", videofilename,
-                            "-vf", f"subtitles={srt_path}",
-                            "-c:a", "copy",
-                            output_path
-                        ], check=True)
-                    except Exception as e:
-                        print(f"Basic subtitle fallback failed: {e}")
-                        # Try copy without subtitles as last resort
-                        try:
-                            subprocess.run([
-                                "ffmpeg", "-y",
-                                "-i", videofilename,
-                                "-c:v", "copy",
-                                "-c:a", "copy",
-                                output_path
-                            ], check=True)
-                        except Exception as copy_error:
-                            print(f"Video copy fallback failed: {copy_error}")
-                
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    print(f"Fallback subtitling successful: {output_path}")
-                    return output_path
-            except Exception as ffmpeg_error:
-                print(f"Fallback ffmpeg method failed: {ffmpeg_error}")
-            
-            # If all else fails, return the original video
             return videofilename
             
     except Exception as e:
@@ -941,15 +586,7 @@ def load_whisper_model(model_size="base"):
     return model
 
 def test_subtitle_pipeline(input_video_path, output_dir="output"):
-    """Test the complete subtitling pipeline with a sample video
-    
-    Args:
-        input_video_path: Path to input video file
-        output_dir: Directory to save output files
-    
-    Returns:
-        Path to the output video with subtitles
-    """
+    """Test the complete subtitling pipeline with a sample video"""
     print(f"Testing subtitle pipeline with video: {input_video_path}")
     
     # Create output directory if it doesn't exist
@@ -967,15 +604,14 @@ def test_subtitle_pipeline(input_video_path, output_dir="output"):
     # 3. Transcribe audio
     word_level_info = transcribe_audio(model, audio_path)
     
-    # 4. Add subtitles to video
-    # Default settings for subtitles
-    v_type = "highlights"
-    subs_position = "bottom75"
-    highlight_color = "yellow"
-    fontsize = 5  # % of frame height
-    opacity = 0.8
-    max_chars = 50
-    text_color = "yellow"
+    # 4. Add subtitles to video - CHANGED to match test_movie.py settings
+    v_type = "9x16"  # Changed from "highlights" to "9x16"
+    subs_position = "center"  # Changed from "bottom75" to "center"
+    highlight_color = None  # Changed from "yellow" to None
+    fontsize = 7.0  # Changed from 5 to 7.0
+    opacity = 0.0  # Changed from 0.8 to 0.0
+    max_chars = 12  # Changed from 50 to 12
+    text_color = "white"  # Changed from "yellow" to "white"
     
     # 5. Process and add subtitles
     output_path, _ = add_subtitle(
