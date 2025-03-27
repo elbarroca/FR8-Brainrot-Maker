@@ -13,9 +13,10 @@ from downloader import VideoDownloader
 from highlights import HighlightExtractor
 from video_formatter import VideoFormatter
 from movie import load_whisper_model, create_audio, transcribe_audio, add_subtitle
+from test_subtitle_styles import SUBTITLE_STYLES
 
 class BrainrotWorkflow:
-    def __init__(self, output_dir="output", temp_dir=None):
+    def __init__(self, output_dir="output", temp_dir=None, subtitle_style="default"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
@@ -23,6 +24,9 @@ class BrainrotWorkflow:
             temp_dir = self.output_dir / "temp"
         self.temp_dir = Path(temp_dir)
         self.temp_dir.mkdir(exist_ok=True)
+        
+        # Store subtitle style
+        self.subtitle_style = subtitle_style
         
         # Initialize components
         self.downloader = VideoDownloader(str(self.output_dir))
@@ -37,7 +41,10 @@ class BrainrotWorkflow:
         # Create semaphores for resource control
         self.io_semaphore = asyncio.Semaphore(8)  # For I/O bound operations
         self.cpu_semaphore = asyncio.Semaphore(os.cpu_count())  # For CPU bound operations
-        self.ffmpeg_semaphore = asyncio.Semaphore(4)  # Limit concurrent FFmpeg processes
+        
+        # Allow more concurrent FFmpeg processes to speed up processing
+        cpu_count = os.cpu_count() or 4
+        self.ffmpeg_semaphore = asyncio.Semaphore(min(cpu_count, 8))  # Limit concurrent FFmpeg processes
         
         # Create executor pools
         self.process_pool = ProcessPoolExecutor(max_workers=min(os.cpu_count(), 4))
@@ -47,24 +54,23 @@ class BrainrotWorkflow:
 
     async def run_subprocess(self, cmd, check=True, timeout=300):
         """Run a subprocess asynchronously with timeout"""
-        async with self.ffmpeg_semaphore:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+            if check and process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise Exception(f"Command failed with code {process.returncode}: {error_msg}")
+            return process.returncode, stdout, stderr
+        except asyncio.TimeoutError:
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-                if check and process.returncode != 0:
-                    error_msg = stderr.decode() if stderr else "Unknown error"
-                    raise Exception(f"Command failed with code {process.returncode}: {error_msg}")
-                return process.returncode, stdout, stderr
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except:
-                    pass
-                raise Exception(f"Command timed out after {timeout} seconds")
+                process.kill()
+            except:
+                pass
+            raise Exception(f"Command timed out after {timeout} seconds")
 
     async def download_video(self, url):
         """Download video from YouTube"""
@@ -91,16 +97,15 @@ class BrainrotWorkflow:
 
     async def format_for_mobile_async(self, video_path, clip_index):
         """Format a video for mobile viewing asynchronously"""
-        async with self.ffmpeg_semaphore:
-            clip_basename = Path(video_path).stem
-            output_filename = f"mobile_highlight_{clip_index}.mp4"
-            print(f"Formatting clip {clip_index} for mobile viewing: {clip_basename}")
-            formatted_clip = await asyncio.to_thread(
-                self.formatter.format_for_mobile,
-                str(video_path),
-                output_filename
-            )
-            return formatted_clip
+        clip_basename = Path(video_path).stem
+        output_filename = f"mobile_highlight_{clip_index}.mp4"
+        print(f"Formatting clip {clip_index} for mobile viewing: {clip_basename}")
+        formatted_clip = await asyncio.to_thread(
+            self.formatter.format_for_mobile,
+            str(video_path),
+            output_filename
+        )
+        return formatted_clip
             
     async def find_background_video(self, specified_path=None):
         """Find an appropriate background video"""
@@ -139,13 +144,13 @@ class BrainrotWorkflow:
 
     async def stack_videos_async(self, main_clip, background_clip, duration):
         """Stack main clip on top of background video asynchronously"""
+        clip_basename = Path(main_clip).stem
+        clip_index = clip_basename.split('_')[-1] if '_' in clip_basename else '0'
+        output_filename = f"stacked_mobile_highlight_{clip_index}.mp4"
+        output_path = self.temp_dir / output_filename
+        
+        # Get main clip dimensions - use semaphore just for this probe operation
         async with self.ffmpeg_semaphore:
-            clip_basename = Path(main_clip).stem
-            clip_index = clip_basename.split('_')[-1] if '_' in clip_basename else '0'
-            output_filename = f"stacked_mobile_highlight_{clip_index}.mp4"
-            output_path = self.temp_dir / output_filename
-            
-            # Get main clip dimensions
             probe_cmd = [
                 "ffprobe", "-v", "error", 
                 "-select_streams", "v:0", 
@@ -154,71 +159,85 @@ class BrainrotWorkflow:
                 str(main_clip)
             ]
             _, stdout, _ = await self.run_subprocess(probe_cmd)
-            main_width, main_height = map(int, stdout.decode().strip().split(','))
-            
-            # Calculate dimensions for stacking
-            target_width = 1080
-            main_target_height = min(int(main_height * (target_width / main_width)), int(1920 * 0.35))
-            main_target_height = max(main_target_height, int(1920 * 0.25))  # At least 25% of height
-            main_target_height = main_target_height + (main_target_height % 2)  # Ensure even
-            
-            if background_clip and os.path.exists(background_clip):
-                # Scale main video
-                main_scaled = self.temp_dir / f"main_scaled_highlight_{clip_index}.mp4"
-                main_scale_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(main_clip),
-                    "-vf", f"scale={target_width}:{main_target_height}:force_original_aspect_ratio=disable,setsar=1:1",
-                    "-c:v", "libx264", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "192k",
-                    str(main_scaled)
-                ]
-                await self.run_subprocess(main_scale_cmd)
-                
-                # Create gradient separator
-                gradient = self.temp_dir / f"gradient_highlight_{clip_index}.mp4"
-                gradient_height = 4
-                gradient_cmd = [
-                    "ffmpeg", "-y",
-                    "-f", "lavfi",
-                    "-i", f"color=c=0x333333:s=1080x{gradient_height}:d={duration}:r=30",
-                    "-c:v", "libx264", "-crf", "23",
-                    str(gradient)
-                ]
-                await self.run_subprocess(gradient_cmd)
-                
-                # Stack videos with gradient
-                stack_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(main_scaled),
-                    "-i", str(gradient),
-                    "-i", str(background_clip),
-                    "-filter_complex", "[0:v][1:v][2:v]vstack=inputs=3[v]",
-                    "-map", "[v]",
-                    "-map", "0:a",
-                    "-c:v", "libx264", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "192k",
-                    str(output_path)
-                ]
-                
-                try:
-                    await self.run_subprocess(stack_cmd)
-                    return str(output_path)
-                except Exception as e:
-                    print(f"⚠️ Failed to stack videos: {e}")
-            
-            # Fallback to padding if stacking fails or no background
-            pad_height = 1920 - main_target_height
-            pad_cmd = [
+        
+        main_width, main_height = map(int, stdout.decode().strip().split(','))
+        
+        # Calculate dimensions for stacking (no semaphore needed for calculation)
+        target_width = 1080
+        main_target_height = min(int(main_height * (target_width / main_width)), int(1920 * 0.35))
+        main_target_height = max(main_target_height, int(1920 * 0.25))  # At least 25% of height
+        main_target_height = main_target_height + (main_target_height % 2)
+        
+        if background_clip and os.path.exists(background_clip):
+            # Scale main video - acquire semaphore just for this step
+            main_scaled = self.temp_dir / f"main_scaled_highlight_{clip_index}.mp4"
+            main_scale_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(main_clip),
-                "-vf", f"scale={target_width}:{main_target_height},pad={target_width}:1920:0:0:color=black",
+                "-vf", f"scale={target_width}:{main_target_height}:force_original_aspect_ratio=disable,setsar=1:1",
+                "-c:v", "libx264", "-crf", "23",
+                "-c:a", "aac", "-b:a", "192k",
+                str(main_scaled)
+            ]
+            
+            # Create gradient separator - can run in parallel with scaling
+            gradient = self.temp_dir / f"gradient_highlight_{clip_index}.mp4"
+            gradient_height = 4
+            gradient_cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi",
+                "-i", f"color=c=0x333333:s=1080x{gradient_height}:d={duration}:r=30",
+                "-c:v", "libx264", "-crf", "23",
+                str(gradient)
+            ]
+            
+            # Run these two operations in parallel with separate semaphores
+            scale_task = asyncio.create_task(self._run_ffmpeg_with_semaphore(main_scale_cmd))
+            gradient_task = asyncio.create_task(self._run_ffmpeg_with_semaphore(gradient_cmd))
+            
+            # Wait for both to complete
+            await asyncio.gather(scale_task, gradient_task)
+            
+            # Stack videos with gradient - use semaphore for this step
+            stack_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(main_scaled),
+                "-i", str(gradient),
+                "-i", str(background_clip),
+                "-filter_complex", "[0:v][1:v][2:v]vstack=inputs=3[v]",
+                "-map", "[v]",
+                "-map", "0:a",
                 "-c:v", "libx264", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
                 str(output_path)
             ]
+            
+            try:
+                async with self.ffmpeg_semaphore:
+                    await self.run_subprocess(stack_cmd)
+                return str(output_path)
+            except Exception as e:
+                print(f"⚠️ Failed to stack videos: {e}")
+        
+        # Fallback to padding if stacking fails or no background
+        pad_height = 1920 - main_target_height
+        pad_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(main_clip),
+            "-vf", f"scale={target_width}:{main_target_height},pad={target_width}:1920:0:0:color=black",
+            "-c:v", "libx264", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path)
+        ]
+        
+        async with self.ffmpeg_semaphore:
             await self.run_subprocess(pad_cmd)
-            return str(output_path)
+        return str(output_path)
+
+    async def _run_ffmpeg_with_semaphore(self, cmd):
+        """Helper method to run ffmpeg with semaphore protection"""
+        async with self.ffmpeg_semaphore:
+            return await self.run_subprocess(cmd)
 
     def ensure_even_dimensions(self, width, height):
         """Ensure both width and height are even numbers, required by most video codecs"""
@@ -238,11 +257,12 @@ class BrainrotWorkflow:
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(video_path)
         ]
-        _, stdout, _ = await self.run_subprocess(cmd)
+        async with self.ffmpeg_semaphore:
+            _, stdout, _ = await self.run_subprocess(cmd)
         return float(stdout.decode().strip())
 
     async def add_subtitles_async(self, video_path, whisper_model, clip_index, wordlevel_info=None):
-        """Add subtitles to video using pre-computed wordlevel info"""
+        """Add subtitles to video using pre-computed wordlevel info with selected style"""
         clip_basename = Path(video_path).stem
         # Create a unique output directory for this clip to avoid conflicts
         clip_output_dir = self.temp_dir / f"subtitled_{clip_index}"
@@ -253,6 +273,15 @@ class BrainrotWorkflow:
             return video_path
             
         try:
+            # Get style configuration
+            style_config = SUBTITLE_STYLES.get(self.subtitle_style, SUBTITLE_STYLES["default"])
+            
+            # Extract style parameters
+            font_size = style_config.get("font_size", 24)
+            text_color = style_config.get("text_color", "FFFF00")
+            use_outline = style_config.get("use_outline", True)
+            outline_color = style_config.get("outline_color", "000000") if use_outline else None
+            
             # Config for subtitles
             v_type = "9x16"
             
@@ -265,7 +294,10 @@ class BrainrotWorkflow:
                 "-of", "csv=p=0", 
                 str(video_path)
             ]
-            _, stdout, _ = await self.run_subprocess(probe_cmd)
+            
+            async with self.ffmpeg_semaphore:
+                _, stdout, _ = await self.run_subprocess(probe_cmd)
+            
             width, height = map(int, stdout.decode().strip().split(','))
             
             # Position subtitles at 40% from top
@@ -273,16 +305,17 @@ class BrainrotWorkflow:
             
             # Try to add subtitles using the movie.py function
             try:
+                # Use the color parameter passed from the style
                 output_path, _ = add_subtitle(
                     video_path,
                     None,  # No need for audio path since we have wordlevel_info
                     v_type,
                     subs_position,
-                    "#FFFF00",  # Yellow highlight
-                    12.0,       # Font size
-                    0.0,        # No background
-                    12,         # Max chars per line
-                    "#FFFF00",  # Text color
+                    None,  # No highlight color
+                    font_size,
+                    0.0,  # No background
+                    12,   # Max chars per line
+                    f"#{text_color}",  # Add # to text color
                     wordlevel_info,
                     str(clip_output_dir)
                 )
@@ -302,8 +335,17 @@ class BrainrotWorkflow:
             return video_path
 
     async def ffmpeg_subtitle_fallback(self, video_path, wordlevel_info, clip_basename):
-        """Fallback method to add subtitles using FFmpeg directly"""
-        print(f"Using FFmpeg fallback for subtitles")
+        """Fallback method to add subtitles using FFmpeg directly with selected style"""
+        print(f"Using FFmpeg fallback for subtitles with style: {self.subtitle_style}")
+        
+        # Get style configuration
+        style_config = SUBTITLE_STYLES.get(self.subtitle_style, SUBTITLE_STYLES["default"])
+        
+        # Extract style parameters
+        font_size = style_config.get("font_size", 24)
+        text_color = style_config.get("text_color", "FFFF00")
+        use_outline = style_config.get("use_outline", True)
+        outline_color = style_config.get("outline_color", "000000") if use_outline else None
         
         # Create subtitle file
         subtitle_file = self.temp_dir / f"subs_{clip_basename}.srt"
@@ -315,19 +357,33 @@ class BrainrotWorkflow:
                 f.write(f"{start_time} --> {end_time}\n")
                 f.write(f"{word['word']}\n\n")
                 
+        # Convert hex color to ffmpeg subtitle format (BBGGRR)
+        r, g, b = tuple(int(text_color[i:i+2], 16) for i in (0, 2, 4))
+        ffmpeg_color = f"&H{b:02X}{g:02X}{r:02X}&"
+        
+        # Convert outline color if needed
+        if use_outline and outline_color:
+            or_, og, ob = tuple(int(outline_color[i:i+2], 16) for i in (0, 2, 4))
+            outline_ffmpeg_color = f"&H{ob:02X}{og:02X}{or_:02X}&"
+            border_style = "3"  # Outlined and shadowed
+        else:
+            outline_ffmpeg_color = "&H000000&"  # Black
+            border_style = "1"  # No outline
+        
         # Add subtitles with FFmpeg - use unique output name
         output_path = self.output_dir / f"subtitled_{clip_basename}.mp4"
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-            "-vf", f"subtitles={subtitle_file}:force_style='FontSize=24,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,BorderStyle=3'",
+            "-vf", f"subtitles={subtitle_file}:force_style='FontSize={font_size*2},PrimaryColour={ffmpeg_color},OutlineColour={outline_ffmpeg_color},BorderStyle={border_style}'",
             "-c:v", "libx264", "-crf", "23",
             "-c:a", "copy",
             str(output_path)
         ]
         
         try:
-            await self.run_subprocess(cmd)
+            async with self.ffmpeg_semaphore:
+                await self.run_subprocess(cmd)
             return str(output_path)
         except Exception as e:
             print(f"⚠️ FFmpeg subtitle fallback failed: {e}")
@@ -357,7 +413,8 @@ class BrainrotWorkflow:
         ]
         
         try:
-            await self.run_subprocess(cmd)
+            async with self.ffmpeg_semaphore:
+                await self.run_subprocess(cmd)
             if output_path.exists() and output_path.stat().st_size > 0:
                 return str(output_path)
         except Exception as e:
@@ -465,12 +522,18 @@ class BrainrotWorkflow:
             
         return None, False
 
-    async def process_video(self, url, subway_video_path=None):
+    async def process_video(self, url, subway_video_path=None, subtitle_config=None):
         """Process a video through the complete Brainrot workflow"""
         start_time = time.time()
         final_outputs = []
         
         try:
+            # Apply custom subtitle config if provided
+            if subtitle_config:
+                # Update the currently selected style with custom config
+                SUBTITLE_STYLES[self.subtitle_style] = subtitle_config
+                print(f"Applied custom subtitle configuration to style: {self.subtitle_style}")
+            
             # Step 1: Download video
             input_video = await self.download_video(url)
             

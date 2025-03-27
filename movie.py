@@ -331,6 +331,10 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
     # Create the complete subtitle text
     full_text = " ".join([word['word'] for word in textJSON['textcontents']])
     
+    # Add this check inside create_caption
+    if color and not color.startswith('#') and not color in ['white', 'black', 'red', 'blue', 'green', 'yellow']:
+        color = f"#{color}"
+    
     # Create a single text clip with auto-wrapping
     try:
         text_clip = TextClip(
@@ -399,8 +403,8 @@ def get_final_cliped_video(videofilename, linelevel_subtitles, v_type, subs_posi
                 if not all(key in line for key in ['word', 'start', 'end']):
                     continue
                     
-                # Create caption for this line - ONLY WHITE TEXT, no cyan/blue
-                out_clips, positions = create_caption(line, frame_size, v_type, None, fontsize, "white")
+                # Create caption for this line - Use the color parameter passed from the style
+                out_clips, positions = create_caption(line, frame_size, v_type, None, fontsize, color)
                 
                 # Skip if no clips or positions were created
                 if not out_clips or not positions:
