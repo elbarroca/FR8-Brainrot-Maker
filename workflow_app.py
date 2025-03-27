@@ -644,21 +644,28 @@ if show_advanced:
         st.subheader("Background Video")
         background_videos = find_background_videos()
         if background_videos:
-            bg_options = ["Automatic"] + [video["name"] for video in background_videos]
+            bg_options = ["Automatic", "Dynamic (Random per clip)"] + [video["name"] for video in background_videos]
             selected_bg = st.selectbox("Select background video", bg_options)
             
             if selected_bg == "Automatic":
                 st.info("The app will automatically select a background video")
                 bg_video_path = None
+                use_dynamic = False
+            elif selected_bg == "Dynamic (Random per clip)":
+                st.info("🎲 Each clip will use a randomly selected background video, starting at a random point!")
+                bg_video_path = "dynamic"
+                use_dynamic = True
             else:
                 for video in background_videos:
                     if video["name"] == selected_bg:
                         bg_video_path = video["path"]
                         st.success(f"✅ Using {selected_bg} as background video")
+                        use_dynamic = False
                         break
         else:
             st.error("⚠️ No background videos found! Please add MP4 files to the assets folder.")
             bg_video_path = None
+            use_dynamic = False
     
     with col2:
         # Subtitle customization
@@ -773,27 +780,34 @@ else:
     st.subheader("Background Video")
     background_videos = find_background_videos()
     if background_videos:
-        bg_options = ["Automatic"] + [video["name"] for video in background_videos]
+        bg_options = ["Automatic", "Dynamic (Random per clip)"] + [video["name"] for video in background_videos]
         selected_bg = st.selectbox("Select background video", bg_options)
         
         if selected_bg == "Automatic":
             st.info("The app will automatically select a background video")
             bg_video_path = None
+            use_dynamic = False
+        elif selected_bg == "Dynamic (Random per clip)":
+            st.info("🎲 Each clip will use a randomly selected background video, starting at a random point!")
+            bg_video_path = "dynamic"
+            use_dynamic = True
         else:
             for video in background_videos:
                 if video["name"] == selected_bg:
                     bg_video_path = video["path"]
                     st.success(f"✅ Using {selected_bg} as background video")
+                    use_dynamic = False
                     break
     else:
         st.error("⚠️ No background videos found! Please add MP4 files to the assets folder.")
         bg_video_path = None
+        use_dynamic = False
 
 # Process button
 process_button = st.button("Process YouTube Video", type="primary", disabled=not youtube_url)
 
 # Create a function to process the video using BrainrotWorkflow
-async def process_video_with_workflow(url, output_dir, bg_video_path, progress_queue=None, **config):
+async def process_video_with_workflow(url, output_dir, bg_video_path, progress_queue=None, use_dynamic=False, **config):
     """Process a video using BrainrotWorkflow"""
     try:
         # Get the selected style from config
@@ -815,8 +829,13 @@ async def process_video_with_workflow(url, output_dir, bg_video_path, progress_q
         if progress_queue:
             await progress_queue.put({"type": "step", "step": 1, "highlight": 0, "description": "Starting download"})
         
-        # Process the video with subtitle config
-        return await workflow.process_video(url, bg_video_path, subtitle_config)
+        # Process the video with subtitle config and dynamic background setting
+        return await workflow.process_video(
+            url, 
+            bg_video_path, 
+            subtitle_config,
+            use_dynamic_background=use_dynamic
+        )
         
     except Exception as e:
         print(f"Error in workflow: {e}")
@@ -964,6 +983,7 @@ if youtube_url and process_button:
                     run_output_dir, 
                     bg_video_path, 
                     progress_queue,
+                    use_dynamic=use_dynamic,
                     **config
                 )
                 

@@ -44,7 +44,8 @@ class BrainrotWorkflow:
         
         # Allow more concurrent FFmpeg processes to speed up processing
         cpu_count = os.cpu_count() or 4
-        self.ffmpeg_semaphore = asyncio.Semaphore(min(cpu_count, 8))  # Limit concurrent FFmpeg processes
+        # Increased from min(cpu_count, 8) to min(cpu_count * 2, 12) for better parallelism
+        self.ffmpeg_semaphore = asyncio.Semaphore(min(cpu_count * 2, 12))  # More concurrent FFmpeg processes for faster processing
         
         # Create executor pools
         self.process_pool = ProcessPoolExecutor(max_workers=min(os.cpu_count(), 4))
@@ -107,9 +108,26 @@ class BrainrotWorkflow:
         )
         return formatted_clip
             
-    async def find_background_video(self, specified_path=None):
-        """Find an appropriate background video"""
-        if specified_path and os.path.exists(specified_path):
+    async def find_background_video(self, specified_path=None, use_dynamic=False):
+        """Find an appropriate background video
+        
+        Args:
+            specified_path: Specific path to a background video file
+            use_dynamic: If True, randomly select a background for each clip
+        """
+        # First, set the dynamic background flag as a class attribute
+        self.use_dynamic_background = use_dynamic
+        
+        # Handle cases where specified_path indicates dynamic selection
+        if specified_path in ["dynamic", "@assets"]:
+            self.use_dynamic_background = True
+            specified_path = None
+            print(f"🎲 Using dynamic background selection from assets folder")
+        
+        # For non-dynamic, specific background
+        if specified_path and os.path.exists(specified_path) and specified_path not in ["dynamic", "@assets"]:
+            self.background_videos = [specified_path]
+            print(f"Using specific background video: {specified_path}")
             return specified_path
             
         # Look for background videos in assets directory
@@ -134,71 +152,118 @@ class BrainrotWorkflow:
         for ext in ["mp4", "mov", "avi"]:
             background_videos.extend([str(f) for f in assets_dir.glob(f"*.{ext}")])
             
-        if background_videos:
-            # Randomly select a background video
-            bg_video = random.choice(background_videos)
-            print(f"✅ Selected background video: {bg_video}")
-            return bg_video
-                    
-        raise Exception("No suitable background videos found in assets directory")
+        if not background_videos:
+            raise Exception("No suitable background videos found in assets directory")
+            
+        # Save all background videos for dynamic selection later
+        self.background_videos = background_videos
+        
+        # List available backgrounds
+        print(f"Found {len(background_videos)} background videos in assets folder:")
+        for i, bg in enumerate(background_videos):
+            print(f"  {i+1}. {Path(bg).name}")
+        
+        # For dynamic backgrounds, we still return one (it will be re-selected per clip)
+        bg_video = random.choice(background_videos)
+        print(f"✅ Selected initial background video: {bg_video}")
+        if self.use_dynamic_background:
+            print("🎲 Using dynamic background mode: random background for each clip")
+        
+        return bg_video
+
+    async def _extract_audio(self, video_path):
+        """Extract audio from video asynchronously"""
+        # The simplest approach is to use asyncio.to_thread directly
+        return await asyncio.to_thread(create_audio, video_path)
+    
+    async def _transcribe_audio(self, model, audio_path):
+        """Transcribe audio with robust error handling"""
+        try:
+            # Use a thread pool to run the CPU-intensive transcription
+            result = await asyncio.to_thread(transcribe_audio, model, audio_path)
+            
+            # Validate result
+            if not result:
+                print("⚠️ Transcription returned no results")
+                return [{"word": "TRANSCRIPTION EMPTY", "start": 0.0, "end": 5.0}]
+            
+            # Make sure result is a list
+            if not isinstance(result, list):
+                print(f"⚠️ Expected list but got {type(result)}")
+                return [{"word": "TRANSCRIPTION TYPE ERROR", "start": 0.0, "end": 5.0}]
+            
+            # Make sure we have at least one item
+            if len(result) == 0:
+                print("⚠️ Transcription returned empty list")
+                return [{"word": "TRANSCRIPTION EMPTY LIST", "start": 0.0, "end": 5.0}]
+            
+            # Success
+            return result
+        except Exception as e:
+            print(f"⚠️ Transcription failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            return [{"word": "TRANSCRIPTION FAILED", "start": 0.0, "end": 5.0}]
 
     async def stack_videos_async(self, main_clip, background_clip, duration):
-        """Stack main clip on top of background video asynchronously"""
+        """Optimized stacking of videos with better parallelism"""
         clip_basename = Path(main_clip).stem
         clip_index = clip_basename.split('_')[-1] if '_' in clip_basename else '0'
         output_filename = f"stacked_mobile_highlight_{clip_index}.mp4"
         output_path = self.temp_dir / output_filename
         
-        # Get main clip dimensions - use semaphore just for this probe operation
-        async with self.ffmpeg_semaphore:
-            probe_cmd = [
-                "ffprobe", "-v", "error", 
-                "-select_streams", "v:0", 
-                "-show_entries", "stream=width,height", 
-                "-of", "csv=p=0", 
-                str(main_clip)
-            ]
-            _, stdout, _ = await self.run_subprocess(probe_cmd)
+        # Get main clip dimensions using asyncio
+        probe_cmd = [
+            "ffprobe", "-v", "error", 
+            "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height", 
+            "-of", "csv=p=0", 
+            str(main_clip)
+        ]
+        _, stdout, _ = await self.run_subprocess(probe_cmd)
         
         main_width, main_height = map(int, stdout.decode().strip().split(','))
         
-        # Calculate dimensions for stacking (no semaphore needed for calculation)
+        # Calculate dimensions for stacking
         target_width = 1080
         main_target_height = min(int(main_height * (target_width / main_width)), int(1920 * 0.35))
         main_target_height = max(main_target_height, int(1920 * 0.25))  # At least 25% of height
-        main_target_height = main_target_height + (main_target_height % 2)
+        main_target_height = self.ensure_even_dimensions(target_width, main_target_height)[1]
         
         if background_clip and os.path.exists(background_clip):
-            # Scale main video - acquire semaphore just for this step
+            # Run two FFmpeg operations in parallel
             main_scaled = self.temp_dir / f"main_scaled_highlight_{clip_index}.mp4"
+            gradient = self.temp_dir / f"gradient_highlight_{clip_index}.mp4"
+            
+            # Create commands
             main_scale_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(main_clip),
                 "-vf", f"scale={target_width}:{main_target_height}:force_original_aspect_ratio=disable,setsar=1:1",
-                "-c:v", "libx264", "-crf", "23",
+                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
                 "-c:a", "aac", "-b:a", "192k",
                 str(main_scaled)
             ]
             
-            # Create gradient separator - can run in parallel with scaling
-            gradient = self.temp_dir / f"gradient_highlight_{clip_index}.mp4"
             gradient_height = 4
             gradient_cmd = [
                 "ffmpeg", "-y",
                 "-f", "lavfi",
                 "-i", f"color=c=0x333333:s=1080x{gradient_height}:d={duration}:r=30",
-                "-c:v", "libx264", "-crf", "23",
+                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
                 str(gradient)
             ]
             
-            # Run these two operations in parallel with separate semaphores
-            scale_task = asyncio.create_task(self._run_ffmpeg_with_semaphore(main_scale_cmd))
-            gradient_task = asyncio.create_task(self._run_ffmpeg_with_semaphore(gradient_cmd))
+            # Run both in parallel
+            tasks = [
+                self._run_ffmpeg_with_semaphore(main_scale_cmd),
+                self._run_ffmpeg_with_semaphore(gradient_cmd)
+            ]
             
-            # Wait for both to complete
-            await asyncio.gather(scale_task, gradient_task)
+            # Wait for both to finish
+            await asyncio.gather(*tasks)
             
-            # Stack videos with gradient - use semaphore for this step
+            # Now stack the videos
             stack_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(main_scaled),
@@ -207,31 +272,28 @@ class BrainrotWorkflow:
                 "-filter_complex", "[0:v][1:v][2:v]vstack=inputs=3[v]",
                 "-map", "[v]",
                 "-map", "0:a",
-                "-c:v", "libx264", "-crf", "23",
+                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
                 "-c:a", "aac", "-b:a", "192k",
                 str(output_path)
             ]
             
-            try:
-                async with self.ffmpeg_semaphore:
-                    await self.run_subprocess(stack_cmd)
+            await self._run_ffmpeg_with_semaphore(stack_cmd)
+            
+            if output_path.exists():
                 return str(output_path)
-            except Exception as e:
-                print(f"⚠️ Failed to stack videos: {e}")
         
-        # Fallback to padding if stacking fails or no background
-        pad_height = 1920 - main_target_height
+        # Fallback to single-pass solution
+        print(f"⚠️ Using fallback method for clip {clip_index}")
         pad_cmd = [
             "ffmpeg", "-y",
             "-i", str(main_clip),
             "-vf", f"scale={target_width}:{main_target_height},pad={target_width}:1920:0:0:color=black",
-            "-c:v", "libx264", "-crf", "23",
+            "-c:v", "libx264", "-crf", "23", "-preset", "faster",
             "-c:a", "aac", "-b:a", "192k",
             str(output_path)
         ]
         
-        async with self.ffmpeg_semaphore:
-            await self.run_subprocess(pad_cmd)
+        await self._run_ffmpeg_with_semaphore(pad_cmd)
         return str(output_path)
 
     async def _run_ffmpeg_with_semaphore(self, cmd):
@@ -431,37 +493,41 @@ class BrainrotWorkflow:
             return video_path
 
     async def process_highlight_clip(self, highlight_clip, background_video, whisper_model, clip_index):
-        """Process a single highlight clip through the entire pipeline"""
+        """Process a single highlight clip with improved robustness"""
         try:
             print(f"\n--- Processing highlight clip {clip_index+1} ---")
             
-            # Step 1: Start multiple tasks concurrently
-            # - Format video for mobile
-            # - Get video duration and prepare background
-            # - Extract audio for later transcription
+            # Step 1: Format video for mobile
             clip_name = f"highlight_{clip_index}"
-            mobile_task = asyncio.create_task(self.format_for_mobile_async(highlight_clip, clip_index))
-            
-            # Wait for mobile formatting to get duration
-            mobile_clip = await mobile_task
+            mobile_clip = await self.format_for_mobile_async(highlight_clip, clip_index)
             if not mobile_clip:
                 print(f"❌ Failed to format clip for mobile, skipping")
                 return None
                 
-            # Get duration and start background preparation
+            # Get duration for background preparation
             duration = await self.get_video_duration(mobile_clip)
             
-            # Start background preparation and audio extraction concurrently
+            # Run background and audio extraction concurrently
+            audio_task = asyncio.create_task(self._extract_audio(mobile_clip))
             background_task = asyncio.create_task(self.prepare_background_async(background_video, duration, f"{clip_name}_{clip_index}"))
-            audio_task = asyncio.create_task(asyncio.to_thread(create_audio, mobile_clip))
             
-            # While background is being prepared, start transcription if audio is ready
+            # Wait for audio extraction
             audio_path = await audio_task
-            transcription_task = None
-            if audio_path:
-                transcription_task = asyncio.create_task(asyncio.to_thread(transcribe_audio, whisper_model, audio_path))
             
-            # Wait for background preparation
+            # Start transcription with robust error handling
+            wordlevel_info = [{"word": "NO TRANSCRIPTION", "start": 0.0, "end": 5.0}]
+            if audio_path:
+                try:
+                    # Use our improved _transcribe_audio method
+                    wordlevel_info = await self._transcribe_audio(whisper_model, audio_path)
+                    print(f"✅ Transcription complete with {len(wordlevel_info)} words")
+                except Exception as e:
+                    print(f"⚠️ Transcription exception: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    wordlevel_info = [{"word": "TRANSCRIPTION ERROR", "start": 0.0, "end": 5.0}]
+            
+            # Wait for background
             background_result = await background_task
             background_clip, use_background = background_result if background_result else (None, False)
             
@@ -472,21 +538,9 @@ class BrainrotWorkflow:
                 print(f"❌ Failed to stack videos, using mobile clip")
                 stacked_clip = mobile_clip
             
-            # Wait for transcription if it was started
-            wordlevel_info = None
-            if transcription_task:
-                try:
-                    wordlevel_info = await transcription_task
-                    print(f"✅ Transcription complete with {len(wordlevel_info)} words")
-                except Exception as e:
-                    print(f"⚠️ Error in transcription: {e}")
-                    wordlevel_info = [{"word": "TRANSCRIPTION FAILED", "start": 0.0, "end": 5.0}]
-            else:
-                wordlevel_info = [{"word": "NO AUDIO AVAILABLE", "start": 0.0, "end": 5.0}]
-            
             # Add subtitles
             print(f"\n=== STEP 5: ADDING SUBTITLES (Clip {clip_index+1}) ===")
-            subtitled_clip = await self.add_subtitles_async(stacked_clip, whisper_model, clip_index, wordlevel_info)
+            subtitled_clip = await self.add_subtitles_efficient(stacked_clip, clip_index, wordlevel_info)
             
             # Optimize final video
             print(f"\n=== STEP 6: OPTIMIZING (Clip {clip_index+1}) ===")
@@ -497,20 +551,165 @@ class BrainrotWorkflow:
             
         except Exception as e:
             print(f"❌ Error processing highlight clip {clip_index+1}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
-
-    async def prepare_background_async(self, background_video, duration, clip_name):
-        """Prepare background video asynchronously"""
-        if not background_video or not os.path.exists(background_video):
-            return None, False
+            
+    async def add_subtitles_efficient(self, video_path, clip_index, wordlevel_info):
+        """More efficient subtitle addition using direct FFmpeg rendering with centered positioning"""
+        if not wordlevel_info:
+            print(f"⚠️ No transcription data for clip {clip_index}")
+            return video_path
             
         try:
+            # Get style configuration
+            style_config = SUBTITLE_STYLES.get(self.subtitle_style, SUBTITLE_STYLES["default"])
+            
+            # Extract style parameters
+            font_size = style_config.get("font_size", 24)
+            text_color = style_config.get("text_color", "FFFF00")
+            use_outline = style_config.get("use_outline", True)
+            outline_color = style_config.get("outline_color", "000000") if use_outline else None
+            
+            # Create subtitle file directly as SSA/ASS format
+            subtitle_file = self.temp_dir / f"subs_{clip_index}.ass"
+            
+            # Calculate video dimensions for proper positioning
+            probe_cmd = [
+                "ffprobe", 
+                "-v", "error", 
+                "-select_streams", "v:0", 
+                "-show_entries", "stream=width,height", 
+                "-of", "csv=p=0", 
+                str(video_path)
+            ]
+            
+            async with self.ffmpeg_semaphore:
+                _, stdout, _ = await self.run_subprocess(probe_cmd)
+            
+            width, height = map(int, stdout.decode().strip().split(','))
+            
+            # Create the ASS subtitle file with styling
+            with open(subtitle_file, 'w', encoding='utf-8') as f:
+                # Write header
+                f.write("[Script Info]\n")
+                f.write(f"PlayResX: {width}\n")
+                f.write(f"PlayResY: {height}\n")
+                f.write("ScaledBorderAndShadow: yes\n\n")
+                
+                # Write styles - CENTER ALIGNMENT IS KEY HERE
+                f.write("[V4+ Styles]\n")
+                f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+                
+                # Convert hex colors to ASS format (AABBGGRR)
+                primary_color = f"&H00{text_color[4:6]}{text_color[2:4]}{text_color[0:2]}&"
+                outline_col = f"&H00{outline_color[4:6]}{outline_color[2:4]}{outline_color[0:2]}&" if outline_color else "&H000000&"
+                
+                # Create style line
+                bold = 1 if style_config.get("bold", False) else 0
+                outline_size = 1 if use_outline else 0
+                shadow = 1 if use_outline else 0
+                
+                # Position in the MIDDLE - Alignment 5 = center middle of screen
+                # Change from alignment 8 (top center) to 5 (middle center)
+                # Adjust vertical position to be in middle of top portion
+                top_section_height = int(height * 0.4)  # Top 40% of video
+                margin_v = int(top_section_height * 0.5)  # Center within top section
+                
+                f.write(f"Style: Default,Arial,{font_size*2},{primary_color},&H00FFFFFF&,{outline_col},&H80000000&,{bold},0,0,0,100,100,0,0,1,{outline_size},{shadow},5,30,30,{margin_v},1\n\n")
+                
+                # Write events
+                f.write("[Events]\n")
+                f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+                
+                # Add each word as an event
+                for i, word in enumerate(wordlevel_info):
+                    start_time = self.format_ass_time(word["start"])
+                    end_time = self.format_ass_time(word["end"])
+                    text = word["word"].strip()
+                    if text:  # Only add non-empty words
+                        f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}\n")
+            
+            # Add subtitles with FFmpeg - use unique output name
+            output_path = self.temp_dir / f"subtitled_efficient_{clip_index}.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-vf", f"ass={subtitle_file}",
+                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
+                "-c:a", "copy",
+                str(output_path)
+            ]
+            
+            async with self.ffmpeg_semaphore:
+                await self.run_subprocess(cmd)
+                
+            if output_path.exists() and output_path.stat().st_size > 0:
+                return str(output_path)
+            else:
+                print(f"⚠️ Subtitle rendering failed, using original video")
+                return video_path
+                
+        except Exception as e:
+            print(f"⚠️ Error adding subtitles efficiently: {e}")
+            return video_path
+            
+    def format_ass_time(self, seconds):
+        """Format time in ASS format (H:MM:SS.cc)"""
+        hours = int(seconds / 3600)
+        minutes = int((seconds % 3600) / 60)
+        secs = seconds % 60
+        centisecs = int((secs - int(secs)) * 100)
+        return f"{hours}:{minutes:02d}:{int(secs):02d}.{centisecs:02d}"
+
+    async def prepare_background_async(self, background_video, duration, clip_name):
+        """Prepare background video asynchronously with truly random selection for each clip"""
+        try:
+            # For dynamic background mode, select a new random background for each clip
+            if hasattr(self, 'use_dynamic_background') and self.use_dynamic_background:
+                # Make sure we have background videos to choose from
+                if hasattr(self, 'background_videos') and self.background_videos:
+                    # Force selection of a truly random background for each clip
+                    if len(self.background_videos) > 1:
+                        # Don't reuse the previous background if possible
+                        previous_bg = background_video
+                        available_bgs = [bg for bg in self.background_videos if bg != previous_bg]
+                        if available_bgs:
+                            background_video = random.choice(available_bgs)
+                        else:
+                            background_video = random.choice(self.background_videos)
+                    else:
+                        background_video = self.background_videos[0]
+                    
+                    print(f"🎲 Selected random background for clip {clip_name}: {Path(background_video).name}")
+            
+            if not background_video or not os.path.exists(background_video):
+                print(f"⚠️ No valid background video for clip {clip_name}")
+                return None, False
+            
             bg_filename = f"bg_{clip_name}.mp4"
+            
+            # Get video duration for random starting point
+            try:
+                video_duration = await self.get_video_duration(background_video)
+            except Exception as e:
+                print(f"⚠️ Unable to get background video duration: {e}")
+                video_duration = None
+            
+            # Calculate a random start time if video is long enough
+            start_time = 0
+            if video_duration and video_duration > duration + 5:  # +5s buffer
+                max_start = max(0, video_duration - duration - 5)  # -5s safety margin
+                start_time = random.uniform(0, max_start)
+                print(f"🎲 Starting background at {start_time:.2f}s (of {video_duration:.2f}s)")
+            
+            # Use thread pool for more efficient processing
             background_clip = await asyncio.to_thread(
                 self.formatter.loop_subway_surfers,
                 background_video,
                 duration,
-                bg_filename
+                bg_filename,
+                start_time
             )
             
             if background_clip and os.path.exists(background_clip):
@@ -519,10 +718,12 @@ class BrainrotWorkflow:
                 
         except Exception as e:
             print(f"⚠️ Error preparing background: {e}")
+            import traceback
+            traceback.print_exc()
             
         return None, False
 
-    async def process_video(self, url, subway_video_path=None, subtitle_config=None):
+    async def process_video(self, url, subway_video_path=None, subtitle_config=None, use_dynamic_background=False):
         """Process a video through the complete Brainrot workflow"""
         start_time = time.time()
         final_outputs = []
@@ -530,9 +731,13 @@ class BrainrotWorkflow:
         try:
             # Apply custom subtitle config if provided
             if subtitle_config:
-                # Update the currently selected style with custom config
                 SUBTITLE_STYLES[self.subtitle_style] = subtitle_config
                 print(f"Applied custom subtitle configuration to style: {self.subtitle_style}")
+            
+            # Set dynamic background flag if either parameter indicates it
+            if subway_video_path in ["dynamic", "@assets"] or use_dynamic_background:
+                use_dynamic_background = True
+                print("🎲 Dynamic background mode enabled")
             
             # Step 1: Download video
             input_video = await self.download_video(url)
@@ -540,21 +745,39 @@ class BrainrotWorkflow:
             # Step 2: Extract highlights
             highlight_clips = await self.extract_highlights(input_video)
             
-            # Step 3: Find background video
-            background_video = await self.find_background_video(subway_video_path)
+            # Step 3: Find background video(s)
+            background_video = await self.find_background_video(subway_video_path, use_dynamic_background)
             
-            # Step 4: Load Whisper model (shared across all clips)
+            # Step 4: Load Whisper model
             print("\nInitializing Whisper model for transcription...")
-            whisper_model = load_whisper_model("small")
+            # Load the whisper model - do not await it again later
+            whisper_model = await self._load_whisper_model_async("small")
             
-            # Step 5: Process each highlight clip concurrently
-            tasks = []
+            # Process highlights in controlled batches
+            cpu_count = os.cpu_count() or 4
+            batch_size = max(2, min(cpu_count, 4))
+            print(f"Processing clips in batches of {batch_size} for optimal performance")
+            
+            # Process clips in batches
+            all_tasks = []
             for i, clip in enumerate(highlight_clips):
                 task = self.process_highlight_clip(clip, background_video, whisper_model, i)
-                tasks.append(task)
+                all_tasks.append(task)
             
-            # Wait for all tasks to complete
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Process in batches if there are many clips
+            if len(all_tasks) > batch_size * 2:
+                results = []
+                for i in range(0, len(all_tasks), batch_size):
+                    batch = all_tasks[i:i+batch_size]
+                    print(f"\nProcessing batch {i//batch_size + 1}/{(len(all_tasks) + batch_size - 1)//batch_size}...")
+                    batch_results = await asyncio.gather(*batch, return_exceptions=True)
+                    results.extend(batch_results)
+                    # Release resources between batches
+                    if i + batch_size < len(all_tasks):
+                        await asyncio.sleep(0.2)
+            else:
+                # For fewer clips, process all concurrently
+                results = await asyncio.gather(*all_tasks, return_exceptions=True)
             
             # Collect successful results
             for i, result in enumerate(results):
@@ -565,6 +788,7 @@ class BrainrotWorkflow:
             
             # Clean up temporary files
             print("\n=== CLEANING UP TEMPORARY FILES ===")
+            await self._cleanup_temp_files()
             
             total_time = time.time() - start_time
             print(f"\n=== PROCESSING COMPLETE ===")
@@ -577,7 +801,30 @@ class BrainrotWorkflow:
             
         except Exception as e:
             print(f"❌ Error in main workflow: {e}")
+            import traceback
+            traceback.print_exc()
             return final_outputs
+
+    async def _load_whisper_model_async(self, model_size):
+        """Load whisper model asynchronously without trying to await the model itself"""
+        # Use asyncio.to_thread to load the model in a thread
+        return await asyncio.to_thread(load_whisper_model, model_size)
+
+    async def _cleanup_temp_files(self):
+        """Clean up temporary files to save disk space"""
+        try:
+            import shutil
+            # Only remove files with certain patterns
+            for pattern in ['*.mp4', '*.wav', '*.ass', '*.srt']:
+                for file in self.temp_dir.glob(pattern):
+                    if file.is_file() and not file.name.startswith('optimized_'):
+                        try:
+                            os.remove(file)
+                        except:
+                            pass
+            print("✅ Temporary files cleaned up")
+        except Exception as e:
+            print(f"⚠️ Error cleaning up temporary files: {e}")
 
 async def main():
     parser = argparse.ArgumentParser(description="Brainrot Video Workflow")

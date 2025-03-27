@@ -93,7 +93,7 @@ class VideoFormatter:
         print(f"Cropped asset video saved to: {output_path}")
         return output_path
         
-    def loop_subway_surfers(self, asset_video, target_duration, output_filename=None):
+    def loop_subway_surfers(self, asset_video, target_duration, output_filename=None, start_time=None):
         """
         Prepares an asset video for use as background by cropping the top portion.
         
@@ -101,6 +101,7 @@ class VideoFormatter:
             asset_video: Path to the asset video file
             target_duration: Duration in seconds the output video should be
             output_filename: Optional name for the output file
+            start_time: Specific time in seconds to start the video segment (if None, uses a random start)
             
         Returns:
             Path to the processed video file
@@ -138,18 +139,20 @@ class VideoFormatter:
                 
             print(f"Cropping {crop_pixels}px ({crop_percent*100}%) from the top of the video")
             
-            # Apply a random start point (required feature)
-            random_start = random.randint(0, 5)  # random start between 0 and 5 seconds
-            print(f"Using random start point: {random_start}s")
+            # Use provided start_time or generate a random one if not provided
+            if start_time is None:
+                start_time = random.uniform(0, 5)  # random start between 0 and 5 seconds
+            
+            print(f"Using start point: {start_time:.2f}s")
             
             # Simple command to:
-            # 1. Start at random position
+            # 1. Start at specified/random position
             # 2. Scale to 1080px width
             # 3. Crop top 25%
             # 4. Ensure all dimensions are even (required by some codecs)
             cmd = [
                 "ffmpeg", "-y",
-                "-ss", str(random_start),
+                "-ss", str(start_time),
                 "-i", str(asset_video),
                 "-t", str(target_duration),
                 "-vf", f"scale={target_width}:-2,crop=in_w:in_h-{crop_pixels}:0:{crop_pixels},setsar=1:1",
