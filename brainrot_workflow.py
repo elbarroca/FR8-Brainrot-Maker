@@ -13,7 +13,7 @@ from downloader import VideoDownloader
 from highlights import HighlightExtractor
 from video_formatter import VideoFormatter
 from movie import load_whisper_model, create_audio, transcribe_audio, add_subtitle
-from test_subtitle_styles import SUBTITLE_STYLES
+from subtitle_styles import SUBTITLE_STYLES
 
 class BrainrotWorkflow:
     def __init__(self, output_dir="output", temp_dir=None, subtitle_style="default"):

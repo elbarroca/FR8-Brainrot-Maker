@@ -12,7 +12,7 @@ from datetime import datetime
 # Import from our modules
 from movie import load_whisper_model
 from brainrot_workflow import BrainrotWorkflow
-from test_subtitle_styles import SUBTITLE_STYLES
+from subtitle_styles import SUBTITLE_STYLES
 
 # Funny loading GIFs to show during processing
 LOADING_GIFS = [
