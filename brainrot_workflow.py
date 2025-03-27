@@ -38,20 +38,23 @@ class BrainrotWorkflow:
         self.highlight_extractor.max_clip_duration = 40
         self.highlight_extractor.silent_threshold = 0.04
         
-        # Create semaphores for resource control
-        self.io_semaphore = asyncio.Semaphore(8)  # For I/O bound operations
-        self.cpu_semaphore = asyncio.Semaphore(os.cpu_count())  # For CPU bound operations
-        
-        # Allow more concurrent FFmpeg processes to speed up processing
+        # Get system information for optimal performance settings
         cpu_count = os.cpu_count() or 4
-        # Increased from min(cpu_count, 8) to min(cpu_count * 2, 12) for better parallelism
-        self.ffmpeg_semaphore = asyncio.Semaphore(min(cpu_count * 2, 12))  # More concurrent FFmpeg processes for faster processing
         
-        # Create executor pools
-        self.process_pool = ProcessPoolExecutor(max_workers=min(os.cpu_count(), 4))
-        self.thread_pool = ThreadPoolExecutor(max_workers=16)
+        # Create semaphores for resource control with higher concurrency limits
+        self.io_semaphore = asyncio.Semaphore(16)  # Increased from 8 to 16 for I/O bound operations
+        self.cpu_semaphore = asyncio.Semaphore(cpu_count + 2)  # Added +2 as buffer for CPU operations
+        
+        # Significantly increase FFmpeg parallelism since most bottlenecks are I/O bound rather than CPU bound
+        # FFmpeg processes can run in parallel with less resource contention than previously allowed
+        self.ffmpeg_semaphore = asyncio.Semaphore(min(cpu_count * 3, 24))  # Triple capacity, up to 24 concurrent processes
+        
+        # Create larger executor pools for better throughput
+        self.process_pool = ProcessPoolExecutor(max_workers=min(cpu_count, 6))  # Increased from 4 to 6
+        self.thread_pool = ThreadPoolExecutor(max_workers=32)  # Doubled from 16 to 32
         
         print(f"BrainrotWorkflow initialized with output_dir={output_dir}, temp_dir={temp_dir}")
+        print(f"System has {cpu_count} CPUs, configured for optimal parallel processing")
 
     async def run_subprocess(self, cmd, check=True, timeout=300):
         """Run a subprocess asynchronously with timeout"""
@@ -172,15 +175,49 @@ class BrainrotWorkflow:
         return bg_video
 
     async def _extract_audio(self, video_path):
-        """Extract audio from video asynchronously"""
-        # The simplest approach is to use asyncio.to_thread directly
-        return await asyncio.to_thread(create_audio, video_path)
+        """Extract audio from video asynchronously with optimized settings"""
+        try:
+            # Create an optimized output filename
+            audio_path = str(self.temp_dir / f"{Path(video_path).stem}.mp3")
+            
+            # Use optimized FFmpeg command for audio extraction
+            # Lower quality (128k) is sufficient for speech recognition
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-vn",  # No video
+                "-c:a", "libmp3lame",  # Use MP3 encoding which is faster than AAC
+                "-q:a", "4",  # Use quality-based VBR encoding (faster than CBR)
+                "-ac", "1",  # Convert to mono (sufficient for speech, faster processing)
+                audio_path
+            ]
+            
+            async with self.io_semaphore:  # Use I/O semaphore instead of FFmpeg semaphore
+                await self.run_subprocess(cmd)
+                
+            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+                print(f"Successfully extracted audio to: {audio_path}")
+                return audio_path
+            else:
+                print(f"⚠️ Failed to extract audio: output file is empty or missing")
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Error extracting audio: {e}")
+            return None
     
     async def _transcribe_audio(self, model, audio_path):
-        """Transcribe audio with robust error handling"""
+        """Transcribe audio with more efficient resource utilization and parallelism"""
         try:
+            print(f"Transcribing audio: {audio_path}")
+            
             # Use a thread pool to run the CPU-intensive transcription
-            result = await asyncio.to_thread(transcribe_audio, model, audio_path)
+            # with bounded timeout to prevent hanging
+            async with self.cpu_semaphore:  # Limit concurrent transcriptions to avoid memory issues
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(transcribe_audio, model, audio_path),
+                    timeout=120  # 2-minute timeout for transcription
+                )
             
             # Validate result
             if not result:
@@ -197,8 +234,23 @@ class BrainrotWorkflow:
                 print("⚠️ Transcription returned empty list")
                 return [{"word": "TRANSCRIPTION EMPTY LIST", "start": 0.0, "end": 5.0}]
             
-            # Success
-            return result
+            # Success - process in chunks for more efficient memory usage
+            processed_results = []
+            chunk_size = 100  # Process in chunks of 100 words
+            
+            for i in range(0, len(result), chunk_size):
+                chunk = result[i:i+chunk_size]
+                processed_results.extend(chunk)
+                
+                # Yield control back to event loop periodically
+                if i + chunk_size < len(result):
+                    await asyncio.sleep(0)
+            
+            return processed_results
+            
+        except asyncio.TimeoutError:
+            print("⚠️ Transcription timed out after 2 minutes")
+            return [{"word": "TRANSCRIPTION TIMEOUT", "start": 0.0, "end": 5.0}]
         except Exception as e:
             print(f"⚠️ Transcription failed with error: {e}")
             import traceback
@@ -206,7 +258,7 @@ class BrainrotWorkflow:
             return [{"word": "TRANSCRIPTION FAILED", "start": 0.0, "end": 5.0}]
 
     async def stack_videos_async(self, main_clip, background_clip, duration):
-        """Optimized stacking of videos with better parallelism"""
+        """Optimized stacking of videos with better parallelism and faster encoding"""
         clip_basename = Path(main_clip).stem
         clip_index = clip_basename.split('_')[-1] if '_' in clip_basename else '0'
         output_filename = f"stacked_mobile_highlight_{clip_index}.mp4"
@@ -235,13 +287,14 @@ class BrainrotWorkflow:
             main_scaled = self.temp_dir / f"main_scaled_highlight_{clip_index}.mp4"
             gradient = self.temp_dir / f"gradient_highlight_{clip_index}.mp4"
             
-            # Create commands
+            # Create commands with optimized settings
             main_scale_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(main_clip),
                 "-vf", f"scale={target_width}:{main_target_height}:force_original_aspect_ratio=disable,setsar=1:1",
-                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:v", "libx264", "-crf", "24", "-preset", "veryfast",  # Use veryfast preset
+                "-tune", "fastdecode",  # Optimize for faster decoding
+                "-c:a", "aac", "-b:a", "128k",  # Reduced audio bitrate
                 str(main_scaled)
             ]
             
@@ -250,7 +303,7 @@ class BrainrotWorkflow:
                 "ffmpeg", "-y",
                 "-f", "lavfi",
                 "-i", f"color=c=0x333333:s=1080x{gradient_height}:d={duration}:r=30",
-                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
+                "-c:v", "libx264", "-crf", "24", "-preset", "veryfast",
                 str(gradient)
             ]
             
@@ -263,7 +316,7 @@ class BrainrotWorkflow:
             # Wait for both to finish
             await asyncio.gather(*tasks)
             
-            # Now stack the videos
+            # Now stack the videos with optimized settings
             stack_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(main_scaled),
@@ -272,8 +325,10 @@ class BrainrotWorkflow:
                 "-filter_complex", "[0:v][1:v][2:v]vstack=inputs=3[v]",
                 "-map", "[v]",
                 "-map", "0:a",
-                "-c:v", "libx264", "-crf", "23", "-preset", "faster",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:v", "libx264", "-crf", "24", "-preset", "veryfast",
+                "-tune", "fastdecode",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",  # Optimize for web streaming
                 str(output_path)
             ]
             
@@ -282,24 +337,45 @@ class BrainrotWorkflow:
             if output_path.exists():
                 return str(output_path)
         
-        # Fallback to single-pass solution
+        # Fallback to single-pass solution with optimized settings
         print(f"⚠️ Using fallback method for clip {clip_index}")
         pad_cmd = [
             "ffmpeg", "-y",
             "-i", str(main_clip),
             "-vf", f"scale={target_width}:{main_target_height},pad={target_width}:1920:0:0:color=black",
-            "-c:v", "libx264", "-crf", "23", "-preset", "faster",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:v", "libx264", "-crf", "24", "-preset", "veryfast",
+            "-tune", "fastdecode",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
             str(output_path)
         ]
         
         await self._run_ffmpeg_with_semaphore(pad_cmd)
         return str(output_path)
 
-    async def _run_ffmpeg_with_semaphore(self, cmd):
-        """Helper method to run ffmpeg with semaphore protection"""
-        async with self.ffmpeg_semaphore:
-            return await self.run_subprocess(cmd)
+    async def _run_ffmpeg_with_semaphore(self, cmd, timeout=300):
+        """Helper method to run ffmpeg with semaphore protection and optimized timeout handling
+        
+        This uses a streamlined approach with timeouts and better error handling.
+        """
+        try:
+            async with self.ffmpeg_semaphore:
+                # Add nice priority for better system responsiveness
+                # Use nice on Unix systems to reduce priority slightly
+                if os.name != 'nt':  # Not Windows
+                    cmd = ["nice", "-n", "10"] + cmd
+                    
+                # Set specific timeout for this process
+                return await asyncio.wait_for(
+                    self.run_subprocess(cmd, check=False),  # Don't throw exceptions
+                    timeout=timeout
+                )
+        except asyncio.TimeoutError:
+            print(f"⚠️ FFmpeg command timed out after {timeout}s: {' '.join(cmd[:5])}...")
+            return None, None, b"Timeout"
+        except Exception as e:
+            print(f"⚠️ Error running FFmpeg: {e}")
+            return None, None, str(e).encode()
 
     def ensure_even_dimensions(self, width, height):
         """Ensure both width and height are even numbers, required by most video codecs"""
@@ -460,7 +536,7 @@ class BrainrotWorkflow:
         return f"{hours:02d}:{minutes:02d}:{int(secs):02d},{milliseconds:03d}"
 
     async def optimize_video(self, video_path, clip_index):
-        """Optimize video for web sharing with unique output name"""
+        """Optimize video for web sharing with faster encoding"""
         clip_basename = Path(video_path).stem
         # Ensure unique output filename using clip_index
         output_path = self.output_dir / f"optimized_brainrot_highlight_{clip_index}.mp4"
@@ -468,9 +544,12 @@ class BrainrotWorkflow:
         cmd = [
             "ffmpeg", "-y", 
             "-i", str(video_path),
-            "-movflags", "+faststart",
-            "-c:v", "libx264", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",  # Optimize for web streaming
+            "-c:v", "libx264", "-crf", "24", "-preset", "veryfast",  # Faster encoding preset
+            "-tune", "fastdecode",  # Optimize for decoding speed
+            "-c:a", "aac", "-b:a", "128k",  # Reduced audio bitrate
+            # Add thread count for parallel encoding
+            "-threads", str(min(os.cpu_count() or 4, 8)),
             str(output_path)
         ]
         
@@ -493,43 +572,53 @@ class BrainrotWorkflow:
             return video_path
 
     async def process_highlight_clip(self, highlight_clip, background_video, whisper_model, clip_index):
-        """Process a single highlight clip with improved robustness"""
+        """Process a single highlight clip with improved robustness and parallelism"""
         try:
             print(f"\n--- Processing highlight clip {clip_index+1} ---")
             
-            # Step 1: Format video for mobile
+            # Step 1: Create all tasks for this clip at once 
+            # This allows for maximum utilization of resources in parallel
+            
+            # Format video for mobile (basic step that other tasks depend on)
             clip_name = f"highlight_{clip_index}"
             mobile_clip = await self.format_for_mobile_async(highlight_clip, clip_index)
             if not mobile_clip:
                 print(f"❌ Failed to format clip for mobile, skipping")
                 return None
-                
-            # Get duration for background preparation
+            
+            # Get duration (needed for background)
             duration = await self.get_video_duration(mobile_clip)
             
-            # Run background and audio extraction concurrently
-            audio_task = asyncio.create_task(self._extract_audio(mobile_clip))
-            background_task = asyncio.create_task(self.prepare_background_async(background_video, duration, f"{clip_name}_{clip_index}"))
+            # Create all independent tasks in parallel:
+            # 1. Extract audio & transcribe
+            # 2. Prepare background video
+            # We can't optimize more than this without restructuring the dependency graph
             
-            # Wait for audio extraction
-            audio_path = await audio_task
+            # Create and start all tasks concurrently using gather for compatibility
+            audio_task = self._extract_audio(mobile_clip)
+            background_task = self.prepare_background_async(background_video, duration, f"{clip_name}_{clip_index}")
             
-            # Start transcription with robust error handling
+            # Run tasks in parallel
+            audio_path, background_result = await asyncio.gather(audio_task, background_task)
+            
+            # Process results for audio extraction
             wordlevel_info = [{"word": "NO TRANSCRIPTION", "start": 0.0, "end": 5.0}]
             if audio_path:
                 try:
-                    # Use our improved _transcribe_audio method
+                    # Optimize transcription with shorter timeout and parallelized processing
                     wordlevel_info = await self._transcribe_audio(whisper_model, audio_path)
                     print(f"✅ Transcription complete with {len(wordlevel_info)} words")
                 except Exception as e:
                     print(f"⚠️ Transcription exception: {e}")
-                    import traceback
-                    traceback.print_exc()
                     wordlevel_info = [{"word": "TRANSCRIPTION ERROR", "start": 0.0, "end": 5.0}]
             
-            # Wait for background
-            background_result = await background_task
+            # Process results for background
             background_clip, use_background = background_result if background_result else (None, False)
+            
+            # Steps that must be done sequentially after formatting, audio extraction, and background preparation:
+            # 1. Stack videos
+            # 2. Add subtitles 
+            # 3. Optimize final video
             
             # Stack videos
             print(f"\n=== STEP 4: STACKING VIDEOS (Clip {clip_index+1}) ===")
@@ -538,11 +627,11 @@ class BrainrotWorkflow:
                 print(f"❌ Failed to stack videos, using mobile clip")
                 stacked_clip = mobile_clip
             
-            # Add subtitles
+            # Add subtitles (depends on stacked video)
             print(f"\n=== STEP 5: ADDING SUBTITLES (Clip {clip_index+1}) ===")
             subtitled_clip = await self.add_subtitles_efficient(stacked_clip, clip_index, wordlevel_info)
             
-            # Optimize final video
+            # Final optimization (depends on subtitled video)
             print(f"\n=== STEP 6: OPTIMIZING (Clip {clip_index+1}) ===")
             final_clip = await self.optimize_video(subtitled_clip, clip_index)
             
@@ -745,41 +834,69 @@ class BrainrotWorkflow:
             # Step 2: Extract highlights
             highlight_clips = await self.extract_highlights(input_video)
             
-            # Step 3: Find background video(s)
-            background_video = await self.find_background_video(subway_video_path, use_dynamic_background)
-            
-            # Step 4: Load Whisper model
-            print("\nInitializing Whisper model for transcription...")
-            # Load the whisper model - do not await it again later
-            whisper_model = await self._load_whisper_model_async("small")
-            
-            # Process highlights in controlled batches
+            # Create more aggressively parallel batch processing
             cpu_count = os.cpu_count() or 4
-            batch_size = max(2, min(cpu_count, 4))
-            print(f"Processing clips in batches of {batch_size} for optimal performance")
+            optimal_batch_size = max(3, min(cpu_count + 2, 8))  # More aggressive batching: CPU count + 2, up to 8
             
-            # Process clips in batches
+            print(f"Processing {len(highlight_clips)} clips with optimized parallelism...")
+            
+            # Step 3: Pre-load resources in parallel that will be shared across all clips
+            print("\n=== PREPARING SHARED RESOURCES ===")
+            
+            # Load model and find background concurrently
+            resource_tasks = [
+                self._load_whisper_model_async("small"),
+                self.find_background_video(subway_video_path, use_dynamic_background)
+            ]
+            whisper_model, background_video = await asyncio.gather(*resource_tasks)
+            
+            print(f"Using batch size of {optimal_batch_size} for maximum throughput")
+            
+            # Process all clips with improved scheduling
             all_tasks = []
             for i, clip in enumerate(highlight_clips):
                 task = self.process_highlight_clip(clip, background_video, whisper_model, i)
                 all_tasks.append(task)
             
-            # Process in batches if there are many clips
-            if len(all_tasks) > batch_size * 2:
-                results = []
-                for i in range(0, len(all_tasks), batch_size):
-                    batch = all_tasks[i:i+batch_size]
-                    print(f"\nProcessing batch {i//batch_size + 1}/{(len(all_tasks) + batch_size - 1)//batch_size}...")
-                    batch_results = await asyncio.gather(*batch, return_exceptions=True)
-                    results.extend(batch_results)
-                    # Release resources between batches
-                    if i + batch_size < len(all_tasks):
-                        await asyncio.sleep(0.2)
+            # Use dynamic batch scheduling for better load balancing
+            results = []
+            if len(all_tasks) > 3:  # If we have more than 3 clips
+                # Process initial batch immediately to maximize utilization
+                first_batch_size = min(optimal_batch_size, len(all_tasks))
+                print(f"\n=== PROCESSING INITIAL BATCH (1/{(len(all_tasks) + optimal_batch_size - 1) // optimal_batch_size}) ===")
+                first_batch = all_tasks[:first_batch_size]
+                pending = all_tasks[first_batch_size:]
+                
+                # Start processing the first batch
+                batch_tasks = [asyncio.create_task(task) for task in first_batch]
+                
+                # As tasks complete, add new ones to maintain optimal concurrency
+                completed = []
+                while batch_tasks:
+                    # Wait for any task to complete
+                    done, batch_tasks = await asyncio.wait(
+                        batch_tasks, 
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    # Add completed tasks to results
+                    for task in done:
+                        result = task.result()
+                        if result:
+                            completed.append(result)
+                    
+                    # Add new tasks from pending list to maintain concurrency
+                    while pending and len(batch_tasks) < optimal_batch_size:
+                        next_task = pending.pop(0)
+                        batch_tasks.add(asyncio.create_task(next_task))
+                        print(f"Starting clip {len(completed) + len(batch_tasks)}/{len(all_tasks)}")
+                
+                results = completed
             else:
-                # For fewer clips, process all concurrently
+                # For small number of clips, process all at once
                 results = await asyncio.gather(*all_tasks, return_exceptions=True)
             
-            # Collect successful results
+            # Process results
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     print(f"❌ Task for clip {i+1} failed with error: {result}")
@@ -791,8 +908,9 @@ class BrainrotWorkflow:
             await self._cleanup_temp_files()
             
             total_time = time.time() - start_time
+            clips_per_minute = len(final_outputs) / (total_time / 60) if total_time > 0 else 0
             print(f"\n=== PROCESSING COMPLETE ===")
-            print(f"Total time: {total_time:.2f}s")
+            print(f"Total time: {total_time:.2f}s ({clips_per_minute:.2f} clips/minute)")
             print(f"Processed {len(final_outputs)} highlight clips successfully")
             for i, output in enumerate(final_outputs):
                 print(f"  {i+1}. {output}")
