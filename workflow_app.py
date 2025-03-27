@@ -623,6 +623,14 @@ output_dir.mkdir(exist_ok=True)
 st.header("Step 1: Enter YouTube Link")
 youtube_url = st.text_input("Paste YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
 
+# Add processing time disclaimer
+st.markdown("""
+<div style="background-color:#fff3cd; color:#856404; padding:12px 15px; border-radius:5px; border-left:4px solid #ffeeba; margin:10px 0; font-size:14px;">
+    <strong>⏱️ Processing Time:</strong> On average, it takes approximately 1 minute and 43 seconds to produce a single clip. 
+    Please avoid inputting lengthy videos (over 8 minutes) as processing time increases with video duration. It works, we promise!
+</div>
+""", unsafe_allow_html=True)
+
 # Advanced options toggle
 show_advanced = st.checkbox("Show Advanced Options")
 
