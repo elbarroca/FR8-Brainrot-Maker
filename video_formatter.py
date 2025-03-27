@@ -11,6 +11,16 @@ class VideoFormatter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
     
+    def ensure_even_dimensions(self, width, height):
+        """Ensure both width and height are even numbers, required by most video codecs"""
+        width = int(width)
+        height = int(height)
+        if width % 2 != 0:
+            width += 1
+        if height % 2 != 0:
+            height += 1
+        return width, height
+    
     def format_for_mobile(self, input_video, output_filename=None):
         """Format video for mobile viewing in 9:16 aspect ratio without adding vertical black bars"""
         if output_filename is None:
@@ -32,15 +42,15 @@ class VideoFormatter:
             print(f"Source dimensions: {width}x{height}")
             
             # Scale down to 1080px width, preserving aspect ratio.
+            # ENSURE HEIGHT IS EVEN (this is the critical fix)
             target_width = 1080
             target_height = int(height * (target_width / width))
-            if target_height % 2 != 0:
-                target_height += 1
+            target_width, target_height = self.ensure_even_dimensions(target_width, target_height)
             
             format_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(input_video),
-                "-vf", f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,setsar=1:1",
+                "-vf", f"scale={target_width}:{target_height},setsar=1:1",
                 "-c:v", "libx264", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
                 str(output_path)
@@ -122,6 +132,9 @@ class VideoFormatter:
             # Ensure crop value is even
             if crop_pixels % 2 != 0:
                 crop_pixels += 1
+                
+            # For extra safety, use our even dimensions utility
+            target_width, crop_pixels = self.ensure_even_dimensions(target_width, crop_pixels)
                 
             print(f"Cropping {crop_pixels}px ({crop_percent*100}%) from the top of the video")
             

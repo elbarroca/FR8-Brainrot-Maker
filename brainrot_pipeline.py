@@ -14,6 +14,16 @@ from highlights import HighlightExtractor
 from video_formatter import VideoFormatter
 from movie import load_whisper_model, create_audio, transcribe_audio, add_subtitle
 
+def ensure_even_dimensions(width, height):
+    """Ensure both width and height are even numbers, required by most video codecs"""
+    width = int(width)
+    height = int(height)
+    if width % 2 != 0:
+        width += 1
+    if height % 2 != 0:
+        height += 1
+    return width, height
+
 async def process_video(url, output_dir="output", subway_video_path=None, progress_queue=None):
     start_time = time.time()
     print(f"Starting processing for video: {url}")
@@ -163,13 +173,12 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                 print(f"  Source dimensions: {src_width}x{src_height}")
                 target_width = 1080
                 target_height = int(src_height * (target_width / src_width))
-                if target_height % 2 != 0:
-                    target_height += 1
+                target_width, target_height = ensure_even_dimensions(target_width, target_height)
                 print(f"  Scaling to: {target_width}x{target_height}")
                 format_cmd = [
                     "ffmpeg", "-y",
                     "-i", str(highlight_clip),
-                    "-vf", f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,setsar=1:1",
+                    "-vf", f"scale={target_width}:{target_height},setsar=1:1",
                     "-c:v", "libx264", "-crf", "23",
                     "-c:a", "aac", "-b:a", "192k",
                     mobile_clip_path
@@ -291,7 +300,18 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     if bottom_height % 2 != 0:
                         bottom_height -= 1
                         top_ideal_height += 1
-                    print(f"Optimized heights: Main={top_ideal_height}px, Bottom={bottom_height}px (Total: {total_height}px)")
+                        
+                    # Double-check with our utility function to be sure
+                    _, top_ideal_height = ensure_even_dimensions(1080, top_ideal_height)
+                    bottom_height = total_height - top_ideal_height
+                    _, bottom_height = ensure_even_dimensions(1080, bottom_height)
+                    # Adjust again to make sure we get exactly 1920px height
+                    total_height = top_ideal_height + bottom_height
+                    if total_height != 1920:
+                        diff = 1920 - total_height
+                        bottom_height += diff
+                        
+                    print(f"Optimized heights: Main={top_ideal_height}px, Bottom={bottom_height}px (Total: {top_ideal_height + bottom_height}px)")
                     
                     # Scale top video to EXACTLY 1080px width to match other videos
                     top_video_scaled = temp_dir / f"top_scaled_{clip_basename}.mp4"
@@ -464,11 +484,20 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
                     pad_height = target_height - top_height
                     if (top_height + pad_height) % 2 != 0:
                         pad_height += 1
+                    
+                    # Ensure all dimensions are even
+                    top_width, top_height = ensure_even_dimensions(top_width, top_height)
+                    target_height = 1920  # 9:16 for 1080px width
+                    pad_height = target_height - top_height
+                    # Final check to ensure result is even
+                    if (top_height + pad_height) % 2 != 0:
+                        pad_height += 1
+                    
                     print(f"Adding {pad_height}px of padding to reach 9:16 aspect ratio")
                     pad_cmd = [
                         "ffmpeg", "-y",
                         "-i", mobile_clip,
-                        "-vf", f"scale=1080:{top_height},pad=1080:{top_height+pad_height}:0:0:color=black",
+                        "-vf", f"scale={top_width}:{top_height},pad={top_width}:{top_height+pad_height}:0:0:color=black",
                         "-c:v", "libx264", "-crf", "23",
                         "-c:a", "aac", "-b:a", "192k",
                         str(combined_path)
@@ -530,7 +559,7 @@ async def process_video(url, output_dir="output", subway_video_path=None, progre
             print(f"Using subtitle position: {subs_position}")
             
             # Offload subtitle processing to a thread
-            subtitled_clip, _ = await asyncio.to_thread(add_subtitle,
+            subtitled_clip, _ = add_subtitle(
                 str(combined_path),  # Now adding subtitles to the COMBINED video
                 audio_path,
                 "9x16",
