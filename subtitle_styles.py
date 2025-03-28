@@ -14,10 +14,10 @@ from movie import load_whisper_model, create_audio, transcribe_audio, add_subtit
 # Define style presets
 SUBTITLE_STYLES = {
     "default": {
-        "font_size": 24,
-        "text_color": "FFFF00",  # Yellow
+        "font_size": 36,
+        "text_color": "FFFFFF",
         "use_outline": True,
-        "outline_color": "000000",  # Black
+        "outline_color": "000000",
     },
     "large_white": {
         "font_size": 36,
@@ -54,6 +54,12 @@ SUBTITLE_STYLES = {
         "text_color": "FF00FF",  # Pink
         "use_outline": True,
         "outline_color": "000000",  # Black
+    },
+    "focus_style": {
+        "font_size": 42,
+        "text_color": "FFFFFF",  # White text
+        "use_outline": True,
+        "outline_color": "000000",  # Black outline with extra thickness
     }
 }
 

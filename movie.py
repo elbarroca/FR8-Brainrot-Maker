@@ -312,10 +312,10 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
     end_time = textJSON['end']
     duration = end_time - start_time
     
-    # Use smaller font size (4% of video height)
-    font_size = int(frame_height * 0.04)
+    # MODIFIED: Use larger font size (7% of video height instead of 4%)
+    font_size = int(frame_height * 0.07)
     
-    # Set max width for text wrapping (80% of frame width)
+    # Keep max width for text wrapping
     max_text_width = int(frame_width * 0.8)
     
     # Get bold font path
@@ -325,8 +325,8 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
     else:
         bold_font_path = font  # Use the font parameter as fallback
     
-    # Set appropriate stroke width based on font size
-    stroke_width = max(1.5, fontsize / 25)
+    # MODIFIED: Increase stroke width significantly for more prominence
+    stroke_width = max(3.5, fontsize / 10)
     
     # Create the complete subtitle text
     full_text = " ".join([word['word'] for word in textJSON['textcontents']])
@@ -334,6 +334,9 @@ def create_caption(textJSON, framesize, v_type, highlight_color, fontsize, color
     # Add this check inside create_caption
     if color and not color.startswith('#') and not color in ['white', 'black', 'red', 'blue', 'green', 'yellow']:
         color = f"#{color}"
+    
+    # MODIFIED: Force uppercase text for better visibility like in your example
+    full_text = full_text.upper()
     
     # Create a single text clip with auto-wrapping
     try:
