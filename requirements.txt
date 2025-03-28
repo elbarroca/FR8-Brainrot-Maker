@@ -19,9 +19,23 @@ python-dotenv>=1.0.0
 # For async processing
 aiohttp>=3.8.4
 aiodns>=3.0.0
+pycares>=4.3.0  # Required by aiodns
 
+# Video editing tools
 auto-editor>=23.5.0
 pathlib>=1.0.1
-openai-whisper>=20230314
+
+# Subtitle and transcription
+faster-whisper>=1.0.0  # Using faster-whisper instead of openai-whisper for better compatibility
 whisperx>=3.1.0
-pysubs2>=1.6.1 
+pysubs2>=1.6.1
+
+# Additional dependencies
+torch>=2.0.0  # Required for whisper models
+torchaudio>=2.0.0
+transformers>=4.30.0  # Required for whisperx
+pytube>=15.0.0  # Alternative YouTube downloader
+python-multipart>=0.0.6  # For file uploads in Streamlit
+
+# Streamlit specific
+watchdog>=3.0.0  # Required for Streamlit file handling
